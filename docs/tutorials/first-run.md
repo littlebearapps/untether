@@ -83,7 +83,7 @@ When the agent finishes, Untether sends a new message and replaces the progress 
 
 <img src="../assets/screenshots/final-answer-footer.jpg" alt="Final answer with model/cost footer and resume line" width="360" loading="lazy" />
 
-The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx` (Antigravity CLI shows an estimate, `~3% ctx`, when the chat has a model set). When resume lines are enabled, a line like `codex resume abc123` (or `agy --conversation …` for Antigravity CLI) appears too—that's how Untether knows which conversation to continue.
+The footer shows which engine, model, and mode were used, plus cost if available. With Claude Code, the status line also ends with how full the context window is, e.g. `done · claude · 1m 36s · step 10 · 62% ctx` (Antigravity CLI shows an estimate, `~3% ctx`, when the chat has a model set), followed by a count in brackets once the session has been compacted, e.g. `62% ctx (1)`. When resume lines are enabled, a line like `codex resume abc123` (or `agy --conversation …` for Antigravity CLI) appears too—that's how Untether knows which conversation to continue.
 
 ## 5. Continue the conversation
 

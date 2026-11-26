@@ -1275,6 +1275,7 @@ class CodexAppServerRunner(CodexRunner):
             return []
         kind = "tool"
         status = ""
+        detail: dict[str, Any] | None = None
         match item:
             case cas.ContextCompactionItem():
                 # #832: Codex compacting mid-turn (auto); same row as Claude.
@@ -1283,6 +1284,8 @@ class CodexAppServerRunner(CodexRunner):
                 if phase == "completed":
                     state.compactions += 1
                     title = _COMPACTED_TITLE
+                    # #1182: the event the session compaction count counts.
+                    detail = {"compaction": True}
                     logger.info(
                         "codex.compaction.completed",
                         thread_id=state.thread_id,
@@ -1318,6 +1321,7 @@ class CodexAppServerRunner(CodexRunner):
                 kind=kind,
                 title=title,
                 ok=status in {"", "completed"},
+                detail=detail,
             )
         ]
 

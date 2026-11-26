@@ -350,8 +350,10 @@ If a saved level isn't one the model accepts, the run drops it and shows
 
 **Context use.** With a model set for the chat, the first line of a progress message and answer can end with
 `~3% ctx`: the tokens the model last read, as a share of the context window Google publishes for that model. It
-is an estimate. agy doesn't report a window, and it compacts a conversation on its own schedule without saying so,
-so a low figure doesn't mean compaction is far off ([`/compact`](#compact-the-conversation) compacts on demand).
+is an estimate. agy doesn't report a window, and it compacts a conversation on its own schedule, so a low figure
+doesn't mean compaction is far off ([`/compact`](#compact-the-conversation) compacts on demand). After a compaction,
+yours or agy's own, a count follows in brackets: `~5% ctx (1)`, or `🗜️ 1` with no model set. The count stays with
+the conversation and starts again after `/new`.
 With no model set (agy's default), or a model Untether has no published figure for, no percentage is shown. Details:
 [Context use](../reference/runners/antigravity/runner.md#context-use-n-ctx).
 
@@ -461,7 +463,8 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 - Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no
   status message after the answer and no `🔔 Background task finished` follow-up.
 - Claude Code's extras: the Pause & Outline Plan button, Loop mode and a
-  notice when the conversation is compacted automatically (agy doesn't report that; `/compact` is confirmed).
+  progress row when the conversation is compacted automatically (agy's own compactions are only counted in the
+  status line; `/compact` is confirmed).
 - agy's other slash commands: only `/compact` is passed through (see
   [Compact the conversation](#compact-the-conversation)); any other `/`-leading message reaches the model as
   text.

@@ -355,9 +355,10 @@ def test_translate_ignored_step_types_emit_nothing() -> None:
         resume=None,
         found_session=None,
     )
+    # ``checkpoint`` left out: since #1182 it emits one compaction telemetry
+    # event (tests/test_antigravity_compact.py).
     for step_type in (
         "system_message",
-        "checkpoint",
         "unknown",
         "user_input",
         "finish",

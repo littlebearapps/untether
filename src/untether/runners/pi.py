@@ -453,6 +453,10 @@ def translate_pi_event(
                 title = f"context compacted ({tokens_before:,} tokens)"
             else:
                 title = "context compacted"
+            detail: dict[str, Any] = {"result": result} if result else {}
+            if not failed:
+                # #1182: the event the session compaction count counts.
+                detail["compaction"] = True
             out.append(
                 _action_event(
                     phase="completed",
@@ -460,7 +464,7 @@ def translate_pi_event(
                         id=action_id,
                         kind="note",
                         title=title,
-                        detail={"result": result} if result else {},
+                        detail=detail,
                     ),
                     ok=not failed,
                 )

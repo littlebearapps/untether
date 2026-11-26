@@ -826,11 +826,12 @@ publishes for that model:
 
 - It is measured against the model's **published** window. No Google page states the window Antigravity itself
   gives a conversation.
-- agy compacts a conversation on its own schedule and doesn't say when. Its binary carries a checkpoint setting
-  around 256,000 tokens, which is not verified. On a 1,048,576 window that would be about 24 %, so the figure may
-  never get high, and a low figure does not mean compaction is far off. Untether does not model agy's automatic
-  compaction and shows no compaction row for it; after one, the figure simply drops. A [`/compact`](#compact) is
-  confirmed in its own final.
+- agy compacts a conversation on its own schedule. Its binary carries a checkpoint setting around 256,000 tokens,
+  which is not verified (`AGY_CLI_AUTO_COMPACT_OVERRIDE` changes it). On a 1,048,576 window that would be about 24 %,
+  so the figure may never get high, and a low figure does not mean compaction is far off. agy does say when it
+  compacts: a `DONE` `checkpoint` step mid-turn (probe 1182-0, agy 1.5.17). Untether shows no row for it, but counts
+  it in the header (`~5% ctx (1)`, see [Compaction count](#compaction-count)); after one, the figure drops. A
+  [`/compact`](#compact) is confirmed in its own final.
 - A trivial Workspace turn reads about 7,000 tokens, so most chats on a Gemini model show `~1% ctx`.
 - A subagent's own calls aren't in the parent's output, so they aren't counted.
 - The cache-read part comes from one agy 1.3.1 capture (7,312 input + 8,127 cached, between calls of 14,580 and
@@ -865,6 +866,18 @@ through; every other run keeps `--disable-slash-commands`.
   the way every command queues. It is never steered (`steer.skipped reason=native_command`), because a steered
   `/compact` is injected into the running turn as text.
 - Logs: `antigravity.compact.passthrough` at the start of the run, `antigravity.compact.done` on the confirmation.
+
+### Compaction count
+
+([#1182](https://github.com/littlebearapps/untether/issues/1182)) Every `DONE` `checkpoint` step is one compaction,
+whether a `/compact` run wrote it or agy compacted on its own. Probe 1182-0 (agy 1.5.17, 2026-11-26,
+`AGY_CLI_AUTO_COMPACT_OVERRIDE=20K`) saw an ordinary `-p` turn emit one mid-turn, right after a large `read_file`
+output, carrying the summarisation call's own `usage`, and then answer normally; a `/compact` checkpoint has no
+`usage`. No other step type appeared. The runner emits a `telemetry` event (`antigravity.compaction.<step_index>`,
+`detail["compaction"] = True`, no row) and logs `antigravity.compaction step_index= manual=`; the bridge counts it per
+conversation in `session_costs.json` and the header reads `~N% ctx (1)` (or `🗜️ 1` with no model set). An `ERROR`
+checkpoint isn't counted. One automatic compaction was observed, not two in a row; if agy ever writes a checkpoint
+for anything else, it would be counted too.
 
 ## `/export`
 
@@ -976,7 +989,8 @@ Turn the block off with `[progress] show_background_tasks = false`.
 - **Quota and MCP start-up hangs.** A used-up quota on a Google sign-in is stopped by the stderr match above. An
   MCP server that hangs at start-up is left to the ordinary stall warnings and watchdog.
 - **Context use is an estimate, and only with a model set.** See [Context use](#context-use-n-ctx). There is no
-  compaction row for agy's automatic compaction: agy doesn't report it. `/compact` is confirmed in its final.
+  row for agy's automatic compaction, but it is counted in the header ([Compaction count](#compaction-count)).
+  `/compact` is confirmed in its final.
 - **`/export` is lost on restart** and has no terminal turns (see [`/export`](#export)).
 - **The quota line under an answer is only as fresh as your last `/usage`** (at most 15 minutes).
 
@@ -1021,7 +1035,8 @@ rows give their own version and date (latest: agy 1.5.12, 2026-11-19).
 | `/continue` resumes only this project's conversation ([#1039](https://github.com/littlebearapps/untether/issues/1039)) | — (**custom**: reads one agy file, `~/.gemini/antigravity-cli/cache/last_conversations.json`, for the exact run directory and passes the native `--conversation=<id>`) | `--continue` is native but fails the "meets the feature's real requirement" test: it also resumes a conversation from a parent or child directory (probe P-L5, one run each way), and `--help` lists no flag, setting or env var that limits it to the current directory. Reading an engine state file is the exception recorded in decision D33, limited to this file. An id listed under more than one path is refused, because agy also records the directory a conversation was resumed from. Checked 2026-10-12, agy 1.3.3. Retire when agy scopes `--continue` to the current directory or adds a flag for it |
 | Telling a timer's or command's completion notice from a subagent's | — (**custom**: one `system_message` is expected after each finished background command or timer and after each `manage_task` kill, and dropped when the next tool starts) | Same content-less `system_message`. A timer cut short by a message gets no notice of its own: that message is its wakeup, so the one expected is spent on it ([#1086](https://github.com/littlebearapps/untether/issues/1086)). Still a guess when a timer fires on time: agy holds every later line while the `schedule` step is open, so a subagent's result that arrived meanwhile is printed before the timer's own notice and is the one spent (1.3.5). Checked 2026-10-12, agy 1.3.3; re-checked 2026-10-14, agy 1.3.5. Retires with the row above |
 | Context window for `~N% ctx` ([#979](https://github.com/littlebearapps/untether/issues/979)) | — (**custom**: a seeded table, `utils/antigravity_context.py`, of the input limits on Google's own model pages; an unknown model gets no percentage) | Fails "available in headless / stream-json mode". `contextWindow` in `-p /config` is a user setting, not a readout: empty with no `--model` and with each of five models tried. No key in 14 run streams names a window, a limit or a maximum. `/context` is refused in print mode ("it opens the interactive context breakdown"). The binary has a status-line payload (`context_window.context_window_size`) and `ContextWindowMetadata.max_context_tokens`; neither reaches print mode. `agy models` and `-p /model` list no window. The `gemini-3.1-pro` row assumes agy's id is the API model `gemini-3.1-pro-preview`. Checked 2026-10-12, agy 1.3.3. **Retire when agy reports a window in the stream** |
-| Tokens in context for `~N% ctx` | `step_update.usage` on the latest finished `agent_response` step: `input_tokens` + `cache_read_tokens` | `result.usage` is a running sum over every model call and every earlier turn, so it is not the context size. agy has no context-usage request and no compaction signal, so the figure is not corrected for compaction. Checked 2026-10-12, agy 1.3.3 (`step_update.usage` was seen on 1.3.1 and 1.3.3) |
+| Tokens in context for `~N% ctx` | `step_update.usage` on the latest finished `agent_response` step: `input_tokens` + `cache_read_tokens` | `result.usage` is a running sum over every model call and every earlier turn, so it is not the context size. agy has no context-usage request, so the figure is not corrected for compaction until the next model call. Checked 2026-10-12, agy 1.3.3 (`step_update.usage` was seen on 1.3.1 and 1.3.3) |
+| Session compaction count ([#1182](https://github.com/littlebearapps/untether/issues/1182)) | every `DONE` `checkpoint` step (automatic and `/compact`) | Native. Probe 1182-0, agy 1.5.17, 2026-11-26. Counted by the bridge per conversation |
 | Which model a run used, for `~N% ctx` | `init.model` only | It is present only when `--model` is passed (it echoes the flag); with no flag nothing in the stream names the model, so no percentage is shown. `-p /model` answers with the default model for 0 tokens but is a second process answering for the account, not for the run, and a hook payload's `modelName` needs the approval gate; neither is used. The id Untether would pass is not used either: it is not proof of what agy ran. Checked 2026-10-12, agy 1.3.3 |
 | AI credits on `/usage` ([#979](https://github.com/littlebearapps/untether/issues/979)) | `agy -p /credits` (0 tokens; `remaining_credits`, `upgrade_uri`) | Nothing custom. Checked 2026-10-12, agy 1.3.3. Not checked on an API-key sign-in |
 | Quota line under an answer | The cached answer of `agy -p /usage` | Partly custom: agy has no push or cheap in-stream quota value (`/usage` is refused inside a stream-json session), and a probe before each final would delay it, so the line only reads what `/usage` cached (15 min at most). Checked 2026-10-12, agy 1.3.3. Revisit if the stream starts carrying quota |

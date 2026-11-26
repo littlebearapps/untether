@@ -159,7 +159,7 @@ runs no model or tools; see [#375](https://github.com/littlebearapps/untether/is
 
 ### Compaction isn't shown
 
-OpenCode compacts long sessions itself: v1 auto-compacts (the `compaction.auto` setting) and emits `session.compacted` on its server event bus, and v2 has [checkpoint compaction](https://opencode.ai/v2/docs/compaction). But `opencode run --format json` only forwards `step_start`, `tool_use`, `text`, `step_finish` and `error`, so Untether never sees a compaction. There is no `🗜️` row for OpenCode as there is for Claude Code and Pi.
+OpenCode compacts long sessions itself: v1 auto-compacts (the `compaction.auto` setting) and emits `session.compacted` on its server event bus, and v2 has [checkpoint compaction](https://opencode.ai/v2/docs/compaction). But `opencode run --format json` only forwards `step_start`, `tool_use`, `text`, `step_finish` and `error`, so Untether never sees a compaction. There is no `🗜️` row for OpenCode as there is for Claude Code and Pi, and no session compaction count in the header ([#1182](https://github.com/littlebearapps/untether/issues/1182); checked on 1.19.6, planned with the ACP transport in v0.36.3, #969–#974).
 
 **Impact:** a long session still grows turn by turn until OpenCode compacts it, and each turn resends the history, so responses can slow down (a session that starts at 72k tokens can pass 77k after 4–5 prompts). Per-run token counts drop after a compaction with no explanation in the chat.
 

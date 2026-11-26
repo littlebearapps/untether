@@ -55,7 +55,9 @@ It shows the state (`working`, `done`, `error`, `cancelled`), the engine, the el
 
 After the session's first compaction, a number in brackets follows the percentage: it counts the session's compactions, so `18% ctx (1)` after the first and `41% ctx (2)` after the second. Between a compaction and Claude's next response, when there is no percentage, it reads `🗜️ 1` instead. The count belongs to the session, so it carries over to follow-ups, resumed sessions and a restart, and starts again after `/new`. Only compactions Untether saw are counted: a session you started in a terminal starts at 0. `show_context_usage = false` hides the count too.
 
-Antigravity chats can show an estimate instead, written `~3% ctx`: the tokens the model last read against the window Google publishes for that model. It appears only when the chat has a model set that Untether has a published figure for, and agy doesn't report its own automatic compaction, so there is no compaction row for it; a [`/compact`](antigravity.md#compact-the-conversation) you send is answered `🗜️ Context compacted (manual)`. See [Use Antigravity CLI](antigravity.md#models-and-effort).
+The count works the same way for Codex on the app-server transport, Pi and Antigravity. Pi has no percentage, so its status line shows `🗜️ 1` on its own. Antigravity counts both a `/compact` you send and the compactions agy does on its own. Codex on the default `exec` transport and OpenCode don't report compactions, so they show no count.
+
+Antigravity chats can show an estimate instead, written `~3% ctx`: the tokens the model last read against the window Google publishes for that model. It appears only when the chat has a model set that Untether has a published figure for, and there is no progress row for agy's own automatic compaction (it is counted, see below); a [`/compact`](antigravity.md#compact-the-conversation) you send is answered `🗜️ Context compacted (manual)`. See [Use Antigravity CLI](antigravity.md#models-and-effort).
 
 When Claude compacts its context, the progress message shows one row for it (a single step):
 

@@ -60,6 +60,14 @@ request's size with the breakdown zeroed, so the value after a compaction is tha
 updates it. Exec gets neither: #832's exec half (reading Codex's rollout files) is won't-do under the native-first
 rule (DEC-13).
 
+**Session compaction count ([#1182](https://github.com/littlebearapps/untether/issues/1182), app-server only).** The `contextCompaction` `item/completed` row carries
+`detail["compaction"] = True` (never the started row), and the bridge counts it per thread in `session_costs.json`:
+the header reads `N% ctx (1)`, and the count carries over to later runs of the same thread. The deprecated
+`thread/compacted` notification is not read (0.171.0 schema: "Use `ContextCompaction` item type instead"). A thread
+Untether hasn't counted yet starts at 0; seeding it from `thread/resume`'s `thread.turns[].items[]` (a native source)
+is a possible follow-up, not built. **Exec gap:** `codex exec --json` has no compaction event (checked on 0.170.0;
+0.171.0's binary has no `context_compaction` item string, inferred), so exec chats show no count.
+
 ## Project trust ([#1240](https://github.com/littlebearapps/untether/issues/1240))
 
 codex-cli 0.169.0+ disables an untrusted project's `.codex/` layer (config, MCP servers, hooks, rules). Exec reports
@@ -220,3 +228,4 @@ What the Codex runner builds itself, and why (native-first rule, step 4). Checke
 | Web search ([#423](https://github.com/littlebearapps/untether/issues/423)) | native: `web_search` config key | 0.171.0, 2026-11-23 (DEC-25) | Per-chat Codex default / Live / Off: exec `-c web_search="live"\|"disabled"` before `exec`; app-server `config.web_search` on `thread/start` and `thread/resume` (validated by Codex). `modelProvider/capabilities/read.webSearch` hides the setting; `configRequirements/read.allowedWebSearchModes` limits it. A resumed thread may keep its search provider (upstream #62144). `--ephemeral`, `--ignore-user-config`, `--ignore-rules` stay won't-do (DEC-12, re-verified on 0.171.0) |
 | Model after `/model clear` on a resumed thread ([#1369](https://github.com/littlebearapps/untether/issues/1369)) | native: `config/read` + `thread/resume.model` (stable) | 0.170.0, 2026-11-22 | Probed: a thread started on `gpt-nonexistent` (its one turn failed `modelNotFound`, no tokens) resumed on `gpt-nonexistent` with no `model` and on the configured `gpt-6.1-sol` when `thread/resume` carried `config/read`'s `config.model`. With no model in Codex's config the thread keeps its saved model (`shortcut:`; `model/list`'s `isDefault` would cover it), so the `modelNotFound` hint also names `/new` |
 | `% ctx`, compaction row | native | 0.170.0, 2026-11-19 (P8) | `thread/tokenUsage/updated` and the `contextCompaction` item (#832); no rollout-file reading (DEC-13) |
+| Session compaction count | native (app-server); exec: none | 0.171.0, 2026-11-26 | the `contextCompaction` completion, counted by the bridge ([#1182](https://github.com/littlebearapps/untether/issues/1182)); exec has no compaction event, so no count |
