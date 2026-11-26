@@ -149,14 +149,26 @@ class CodexRpcPeer:
         ) as exc:
             raise CodexRpcClosed(type(exc).__name__) from exc
 
-    async def submit(self, method: str, params: dict[str, Any] | None = None) -> int:
-        """Write a request; returns its id without waiting for the answer."""
+    async def submit(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[int], None] | None = None,
+    ) -> int:
+        """Write a request; returns its id without waiting for the answer.
+
+        ``before_send(rid)`` runs before the write, so a caller can register
+        a waiter the reader can't miss (#964: the response may be read
+        before ``submit`` returns)."""
         rid = self._next_id
         self._next_id += 1
         message: dict[str, Any] = {"method": method, "id": rid}
         if params is not None:
             message["params"] = params
         self.pending[rid] = method
+        if before_send is not None:
+            before_send(rid)
         try:
             await self._write(message)
         except BaseException:

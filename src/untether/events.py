@@ -21,6 +21,8 @@ from .model import (
 
 logger = get_logger(__name__)
 
+STEER_SNIPPET_CHARS = 80
+
 
 class EventFactory:
     __slots__ = ("_resume", "engine")
@@ -139,6 +141,27 @@ class EventFactory:
             message=message,
             level=level,
         )
+
+    def steer_received(
+        self, *, action_id: str, text: str, command_uuid: str
+    ) -> list[ActionEvent]:
+        """The ``↪️ steer received: …`` note row for a steer the engine folded
+        into the running turn (Antigravity #981, Codex #964). The bridge drops
+        the message's reply anchor on ``absorbed_command_uuid``: its answer
+        is this turn's answer."""
+        snippet = " ".join(text.split())
+        if len(snippet) > STEER_SNIPPET_CHARS:
+            snippet = snippet[: STEER_SNIPPET_CHARS - 1] + "…"
+        title = f"\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} steer received: {snippet}"
+        detail = {"absorbed_command_uuid": command_uuid, "steer": True}
+        return [
+            self.action_started(
+                action_id=action_id, kind="note", title=title, detail=detail
+            ),
+            self.action_completed(
+                action_id=action_id, kind="note", title=title, ok=True, detail=detail
+            ),
+        ]
 
     def completed(
         self,

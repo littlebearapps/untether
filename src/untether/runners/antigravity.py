@@ -479,7 +479,6 @@ _OUTPUT_PREVIEW_CHARS = 500
 # ``system_message`` and ``checkpoint`` don't count: a resumed run emits a
 # ``system_message`` before its first model call.
 _MODEL_STEP_TYPES = frozenset({"agent_response", "tool", "subagent", "finish"})
-_STEER_SNIPPET_CHARS = 80
 _ERROR_MESSAGE_CHARS = 300
 _INVALID_LINE_CHARS = 200
 
@@ -3359,22 +3358,12 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             session_id=state.session_id,
             command_uuid=item.command_uuid,
         )
-        snippet = " ".join(item.text.split())
-        if len(snippet) > _STEER_SNIPPET_CHARS:
-            snippet = snippet[: _STEER_SNIPPET_CHARS - 1] + "…"
-        title = f"\N{RIGHTWARDS ARROW WITH HOOK}\N{VARIATION SELECTOR-16} steer received: {snippet}"
         state.note_seq += 1
-        action_id = f"antigravity.steer.{state.note_seq}"
-        detail = {"absorbed_command_uuid": item.command_uuid, "steer": True}
-        factory = state.factory
-        return [
-            factory.action_started(
-                action_id=action_id, kind="note", title=title, detail=detail
-            ),
-            factory.action_completed(
-                action_id=action_id, kind="note", title=title, ok=True, detail=detail
-            ),
-        ]
+        return state.factory.steer_received(
+            action_id=f"antigravity.steer.{state.note_seq}",
+            text=item.text,
+            command_uuid=item.command_uuid,
+        )
 
     # -- context use (#979) ---------------------------------------------------
 

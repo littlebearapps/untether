@@ -345,6 +345,50 @@ async def test_non_claude_engine_falls_back(explicit: bool) -> None:
     assert "codex" in _texts(cfg)[0]
 
 
+async def test_codex_app_server_steer_writes_and_acks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#964: on app-server a running Codex turn takes the steer (the target's
+    own turn/steer path is in test_codex_app_server_steer.py)."""
+    from untether.runners import codex_app_server as cas_runner
+
+    monkeypatch.setattr(cas_runner, "APP_SERVER_ACTIVE", True)
+    calls: list[tuple[str, str, str]] = []
+
+    async def steer(session_id: str, text: str, **kwargs: Any) -> str:
+        calls.append((session_id, text, kwargs["command_uuid"]))
+        return "steered"
+
+    monkeypatch.setattr(cas_runner.STEER_BACKEND, "get", lambda _sid: object())
+    monkeypatch.setattr(cas_runner.STEER_BACKEND, "steer", steer)
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    token = ResumeToken(engine="codex", value="thread-1")
+    ok = await _steer(cfg, engine="codex", token=token, running=running)
+    assert ok is True
+    assert _texts(cfg) == [STEERED_ACK]
+    [(sid, text, uuid)] = calls
+    assert (sid, text) == ("thread-1", "also the hostname")
+    assert uuid in rb._FOLLOWUP_ANCHORS  # kept until the steer received row
+
+
+async def test_codex_app_server_without_running_turn_names_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from untether.runners import codex_app_server as cas_runner
+
+    monkeypatch.setattr(cas_runner, "APP_SERVER_ACTIVE", True)
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    token = ResumeToken(engine="codex", value="thread-1")
+    ok = await _steer(
+        cfg, engine="codex", token=token, running=running, override="steer"
+    )
+    assert ok is False
+    assert _texts(cfg) == [fallback_notice("no_live", "codex")]
+    assert "Codex" in _texts(cfg)[0]
+
+
 async def test_codex_compact_is_never_steered() -> None:
     """#964: Codex's bare /compact is its own run (thread/compact/start);
     it queues quietly, while /compact <text> is a prompt like any other."""
@@ -1317,7 +1361,10 @@ def test_agy_is_a_steer_target_not_a_live_session() -> None:
     target = live_sessions.steer_backend("antigravity")
     assert target is not None and target.engine == "antigravity"
     assert live_sessions.steer_backend("claude") is live_sessions.live_backend("claude")
-    assert live_sessions.steer_backend("codex") is None
+    # #964: Codex is a steer-only target too (turn/steer, app-server only).
+    assert live_sessions.steer_backend("codex").engine == "codex"
+    assert live_sessions.live_backend("codex") is None
+    assert live_sessions.steer_backend("opencode") is None
 
 
 async def test_1164_queued_ahead_defers_a_default_steer_but_not_an_explicit_one() -> (

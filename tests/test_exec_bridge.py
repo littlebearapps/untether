@@ -10924,6 +10924,37 @@ def test_499_pending_approval_detected_without_inline_keyboard() -> None:
     assert edits._has_pending_approval() is False
 
 
+def test_1412_codex_waiting_flag_keeps_an_older_open_card_pending() -> None:
+    """#1412 item 1: card A open, then card B answered. The card fallback
+    looks only at the newest row (B, done), so it said False; Codex's
+    ``waitingOnApproval`` flag on the run state now says True."""
+    from untether.events import EventFactory
+    from untether.runners.codex_app_server import CodexAppServerRunner
+
+    transport = FakeTransport()
+    edits = _make_edits(transport, _KeyboardPresenter())
+    factory = EventFactory("codex")
+    keyboard = {"inline_keyboard": [[{"text": "Approve", "callback_data": "x"}]]}
+    for evt in (
+        factory.action_started(
+            action_id="card-a", kind="warning", title="A", detail=keyboard
+        ),
+        factory.action_started(
+            action_id="card-b", kind="warning", title="B", detail=keyboard
+        ),
+        factory.action_completed(
+            action_id="card-b", kind="warning", title="B", ok=True
+        ),
+    ):
+        edits.tracker.note_event(evt)
+    state = CodexAppServerRunner(codex_cmd="codex", extra_args=[]).new_state("p", None)
+    state.thread_id = "t"
+    edits.stream = _make_stream(engine_state=state)
+    assert edits._has_pending_approval() is False
+    state.waiting["t"] = ("waitingOnApproval",)
+    assert edits._has_pending_approval() is True
+
+
 def test_499_pending_approval_falls_back_to_inline_keyboard() -> None:
     """Engines with no control channel keep the old presentation-state path."""
     transport = FakeTransport()

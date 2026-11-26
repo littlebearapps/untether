@@ -34,6 +34,7 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("client_request", "turn/start"): "S",
     ("client_request", "turn/interrupt"): "S",
     ("client_request", "thread/compact/start"): "S",  # #964 /compact
+    ("client_request", "turn/steer"): "S",  # #964 steer
     ("client_notification", "initialized"): "S",
     # Zero-token reads (runners/codex_reads.py: #966, #846, #423). config/read
     # is also the runner's trust and model check (#1369).
@@ -55,6 +56,8 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("server_notification", "warning"): "S",
     ("server_notification", "configWarning"): "S",
     ("server_notification", "deprecationNotice"): "S",
+    # #964 / #1412 item 1: waiting flags for the stall watchdogs.
+    ("server_notification", "thread/status/changed"): "S",
     # #963: approval cards, withdrawal, diff refresh, auto-review rows. The
     # two review notifications are stable methods with an [UNSTABLE] payload
     # (decoded as plain dicts).
@@ -86,6 +89,8 @@ CODEX_APP_SERVER_TYPES: dict[str, tuple[str, ...]] = {
     ),
     "Turn": (),
     "TurnError": (),
+    # #964 / #1412 item 1: thread/status/changed (any activeFlags = waiting).
+    "ThreadStatus": ("idle", "systemError", "active"),
     "ThreadTokenUsage": (),
     "TokenUsageBreakdown": (),
     # #963 cards: the diff, the network prompt, the permission request.
@@ -405,6 +410,14 @@ class PatchUpdatedParams(_Wire):
     turn_id: str = ""
 
 
+class ThreadStatusChangedParams(_Wire):
+    """``status`` is a tagged union (``notLoaded`` / ``idle`` /
+    ``systemError`` / ``active{activeFlags}``), read as a dict."""
+
+    thread_id: str
+    status: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
 class GuardianWarningParams(_Wire):
     message: str
     thread_id: str = ""
@@ -504,6 +517,7 @@ NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "guardianWarning": GuardianWarningParams,
     "account/rateLimits/updated": RateLimitsUpdatedParams,
     "model/rerouted": ModelReroutedParams,
+    "thread/status/changed": ThreadStatusChangedParams,
 }
 
 

@@ -409,6 +409,14 @@ NOTHING_TO_COMPACT_TEXT = (
     "Send a normal message to start one."
 )
 COMPACT_NO_CONVERSATION_BLOCK = "compact_no_conversation"
+# #964: set by ``codex.build_runner`` when ``transport = "app-server"``; the
+# steer target answers "not supported" on exec.
+APP_SERVER_ACTIVE = False
+# #964: how long a steer waits for Codex's answer (Codex answers in ms, P-S1).
+STEER_RESPONSE_S = 5.0
+_SYSTEM_ERROR_NOTE = (
+    "Codex reported a system error on this thread; the turn may not finish."
+)
 _CONTEXT_ACTION_ID = "codex.context"
 _UNKNOWN_ITEMS_LOGGED: set[str] = set()
 # App-server names -> exec's, so exec's title helpers give the same rows.
@@ -664,6 +672,35 @@ class AppServerRunState(CodexRunState):
     # #1412: the main thread's turn/completed arrived (any status); mirrored
     # onto ``JsonlStreamState.saw_result`` for session.summary.
     saw_result: bool = False
+    # #964 steer: waiters by request id, and the text of each steer sent but
+    # not yet seen as a userMessage (by its clientUserMessageId).
+    steer_waits: dict[int, _SteerWait] = field(default_factory=dict)
+    steer_texts: dict[str, str] = field(default_factory=dict)
+    # #1412 item 1: thread/status/changed activeFlags per thread (sub-agent
+    # threads too), set while ``active``.
+    waiting: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+    # Duck-typed by the stall watchdogs (``runner._approval_pending``, the
+    # bridge's ``_has_pending_approval``): Codex is waiting on the user.
+    def awaiting_user_approval(self) -> bool:
+        return bool(self.waiting)
+
+
+@dataclass(slots=True)
+class _SteerWait:
+    """One ``turn/steer`` (§16 item 1): unsent, sent and unconfirmed, or
+    answered (``accepted`` / ``error``)."""
+
+    command_uuid: str
+    sent: bool = False
+    accepted: bool = False
+    error: str | None = None
+    done: anyio.Event = field(default_factory=anyio.Event)
+
+
+# #964: the run that owns each thread right now (one per run until live
+# sessions, 964-3). Set when the thread opens, dropped when the run ends.
+_RUNS_BY_THREAD: dict[str, AppServerRunState] = {}
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -673,6 +710,8 @@ class CodexAppServerRunner(CodexRunner):
 
     process_label = "codex app-server"
     transport = "app-server"
+    # #1412 item 1: the watchdogs read ``awaiting_user_approval``.
+    _EXPOSE_ENGINE_STATE = True
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
@@ -832,14 +871,21 @@ class CodexAppServerRunner(CodexRunner):
             await self._interrupt(state, stream)
             raise
         finally:
-            self._end_cards(state)
+            self._end_run(state)
         peer.close("done" if stream.did_emit_completed else "eof")
         await self._close_process(state.proc)
 
     @staticmethod
-    def _end_cards(state: AppServerRunState) -> None:
-        """#963: the run is over; a later tap on one of its cards reads
-        "session ended" and writes nothing."""
+    def _end_run(state: AppServerRunState) -> None:
+        """The run is over: no more steers into it (#964; a steer still
+        waiting stays unconfirmed, never re-queued), no waiting flags, and a
+        later tap on one of its cards reads "session ended" (#963)."""
+        if state.thread_id and _RUNS_BY_THREAD.get(state.thread_id) is state:
+            del _RUNS_BY_THREAD[state.thread_id]
+        for wait in state.steer_waits.values():
+            wait.done.set()
+        state.steer_waits.clear()
+        state.waiting.clear()
         cards = state.cards
         if cards is None:
             return
@@ -1397,6 +1443,10 @@ class CodexAppServerRunner(CodexRunner):
     def _on_response(
         self, msg: Response, *, state: AppServerRunState, resume: ResumeToken | None
     ) -> list[UntetherEvent]:
+        if msg.method == "turn/steer":
+            # #964: the steer's own answer; never the run's error.
+            self._on_steer_response(msg, state)
+            return []
         if msg.error is not None:
             # Codex's own text: the bridge matches "no rollout found" (#952).
             return [
@@ -1445,6 +1495,18 @@ class CodexAppServerRunner(CodexRunner):
                 started = cas.decode_result("turn/start", msg.result)
                 state.turn_id = started.turn.id
         return []
+
+    @staticmethod
+    def _on_steer_response(msg: Response, state: AppServerRunState) -> None:
+        wait = state.steer_waits.pop(msg.id, None)  # type: ignore[arg-type]
+        if wait is None:
+            return
+        if msg.error is not None:
+            wait.error = msg.error.message
+            state.steer_texts.pop(wait.command_uuid, None)
+        else:
+            wait.accepted = True
+        wait.done.set()
 
     def _decide_sandbox(self, state: AppServerRunState, result: Any) -> None:
         """Full auto omits ``sandbox`` (Codex's own setting), and Ask me /
@@ -1541,6 +1603,7 @@ class CodexAppServerRunner(CodexRunner):
         self, result: cas.ThreadOpenResult, *, state: AppServerRunState
     ) -> list[UntetherEvent]:
         state.thread_id = result.thread.id
+        _RUNS_BY_THREAD[result.thread.id] = state  # #964 steer target
         if state.unattended is None and state.peer is not None:
             # #963: from here an approval request becomes a card.
             state.cards = approvals.CodexApprovals(
@@ -1674,7 +1737,11 @@ class CodexAppServerRunner(CodexRunner):
             case "turn/started":
                 state.turn_id = params.turn.id
                 state.turn_agent_messages.clear()
+            case "thread/status/changed":
+                return self._on_thread_status(params, state=state)
             case "item/started":
+                if params.item.get("type") == "userMessage":
+                    return self._steer_received(params.item, state=state)
                 return self._item_rows("started", params.item, state=state)
             case "item/completed":
                 return self._item_rows("completed", params.item, state=state)
@@ -1700,6 +1767,54 @@ class CodexAppServerRunner(CodexRunner):
                     params.turn, state=state, resume=resume, found_session=found_session
                 )
         return []
+
+    def _on_thread_status(
+        self, params: cas.ThreadStatusChangedParams, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#1412 item 1: ``active{activeFlags}`` (``waitingOnApproval`` /
+        ``waitingOnUserInput``) on any thread, sub-agents included, means
+        Codex is waiting on the user; any other status clears it. Probe
+        1412-1 (0.171.0): the flag arrives just before the approval request
+        and clears once it is answered."""
+        status = params.status
+        kind = status.get("type")
+        flags = status.get("activeFlags") if kind == "active" else None
+        if isinstance(flags, list) and flags:
+            state.waiting[params.thread_id] = tuple(str(f) for f in flags)
+        else:
+            state.waiting.pop(params.thread_id, None)
+        if kind == "systemError" and params.thread_id == state.thread_id:
+            logger.warning("codex.app_server.system_error", thread_id=state.thread_id)
+            return self._warning_rows(
+                state, "thread/status/changed", _SYSTEM_ERROR_NOTE
+            )
+        return []
+
+    @staticmethod
+    def _steer_received(
+        item: dict[str, Any], *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#964: Codex echoes a steer as a ``userMessage`` whose ``clientId``
+        is the steer's ``clientUserMessageId`` (P-S1). The row's
+        ``absorbed_command_uuid`` drops its reply anchor: the answer is this
+        turn's answer."""
+        command_uuid = item.get("clientId")
+        if not isinstance(command_uuid, str):
+            return []
+        text = state.steer_texts.pop(command_uuid, None)
+        if text is None:
+            return []
+        logger.info(
+            "codex.app_server.steer_delivered",
+            thread_id=state.thread_id,
+            command_uuid=command_uuid,
+        )
+        state.note_seq += 1
+        return state.factory.steer_received(
+            action_id=f"codex.steer.{state.note_seq}",
+            text=text,
+            command_uuid=command_uuid,
+        )
 
     def _on_rerouted(
         self, params: cas.ModelReroutedParams, *, state: AppServerRunState
@@ -1865,3 +1980,95 @@ class CodexAppServerRunner(CodexRunner):
         error = state.stopped or _EXITED_EARLY
         logger.warning("codex.app_server.stream_end", error=error)
         return [self._error(state, found_session or resume, error)]
+
+
+# --- steer target (#964; ``live_sessions.steer_backend``) ---------------------
+
+
+class _CodexSteer:
+    """Steer into a running app-server turn with ``turn/steer`` (stable).
+
+    A steer-only target until live sessions (964-3): it writes into the
+    per-run process while its turn runs. Codex folds the text in at its next
+    model call (P6) and rejects it when the turn can't take one; those
+    rejections fall back to the queue."""
+
+    engine = ENGINE
+    display_name = "Codex"
+    log_ns = ENGINE
+
+    @property
+    def supports_steer(self) -> bool:
+        return APP_SERVER_ACTIVE
+
+    def get(self, session_id: str) -> AppServerRunState | None:
+        state = _RUNS_BY_THREAD.get(session_id)
+        if (
+            state is None
+            or state.stopped is not None
+            or state.saw_result
+            or state.turn_id is None
+            or state.peer is None
+            or state.peer.closed_reason is not None
+        ):
+            return None
+        return state
+
+    async def steer(self, session_id: str, text: str, **kwargs: Any) -> str:
+        """``steered``: Codex took it, or it was sent and never answered
+        (never queued twice, §16 item 1). ``window_closed``: no running turn,
+        not sent, or Codex refused it (the caller queues it)."""
+        state = self.get(session_id)
+        if state is None or state.peer is None:
+            return "window_closed"
+        command_uuid = str(kwargs.get("command_uuid") or "")
+        wait = _SteerWait(command_uuid=command_uuid)
+
+        def register(rid: int) -> None:
+            state.steer_waits[rid] = wait
+            state.steer_texts[command_uuid] = text
+
+        params = {
+            "threadId": session_id,
+            "expectedTurnId": state.turn_id,
+            "input": [{"type": "text", "text": text}],
+            "clientUserMessageId": command_uuid,
+        }
+        try:
+            await state.peer.submit("turn/steer", params, before_send=register)
+        except CodexRpcClosed:
+            state.steer_texts.pop(command_uuid, None)
+            logger.info("codex.app_server.steer_unsent", command_uuid=command_uuid)
+            return "window_closed"
+        except CodexRpcWriteTimeout:
+            pass  # part of it may have gone out: unconfirmed, below
+        else:
+            wait.sent = True
+        with anyio.move_on_after(STEER_RESPONSE_S):
+            await wait.done.wait()
+        if wait.accepted:
+            logger.info(
+                "codex.app_server.steer_accepted",
+                thread_id=session_id,
+                turn_id=params["expectedTurnId"],
+                command_uuid=command_uuid,
+            )
+            return "steered"
+        if wait.error is not None:
+            logger.info(
+                "codex.app_server.steer_refused",
+                thread_id=session_id,
+                command_uuid=command_uuid,
+                reason=wait.error,
+            )
+            return "window_closed"
+        logger.warning(
+            "codex.app_server.steer_unconfirmed",
+            thread_id=session_id,
+            command_uuid=command_uuid,
+            sent=wait.sent,
+        )
+        return "steered"
+
+
+STEER_BACKEND = _CodexSteer()

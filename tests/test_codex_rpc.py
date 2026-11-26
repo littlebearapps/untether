@@ -56,6 +56,19 @@ async def test_submit_returns_increasing_ids_without_waiting() -> None:
     assert peer.pending == {1: "initialize", 2: "thread/start"}
 
 
+async def test_before_send_sees_the_id_before_the_write() -> None:
+    """#964 (§16 item 1): a steer's waiter is registered before the line
+    goes out, so a response read before ``submit`` returns still finds it."""
+    sink = Sink()
+    peer = CodexRpcPeer(sink.send)
+    seen: list[tuple[int, int]] = []
+    rid = await peer.submit(
+        "turn/steer", {}, before_send=lambda r: seen.append((r, len(sink.chunks)))
+    )
+    assert seen == [(rid, 0)]
+    assert len(sink.chunks) == 1
+
+
 async def test_responses_match_by_id_out_of_order_and_carry_the_method() -> None:
     peer = CodexRpcPeer(Sink().send)
     await peer.submit("initialize")

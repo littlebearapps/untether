@@ -225,6 +225,19 @@
    },
    "tier": "S"
   },
+  "client_request turn/steer": {
+   "names": {
+    "params.additionalContext": "E",
+    "params.clientUserMessageId": "S",
+    "params.expectedTurnId": "S",
+    "params.input": "S",
+    "params.responsesapiClientMetadata": "E",
+    "params.responsesapiClientMetadataPatch": "E",
+    "params.threadId": "S",
+    "result.turnId": "S"
+   },
+   "tier": "S"
+  },
   "enum ApprovalsReviewer": {
    "names": {
     "auto_review": "S",
@@ -404,6 +417,13 @@
   "server_notification thread/started": {
    "names": {
     "params.thread": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification thread/status/changed": {
+   "names": {
+    "params.status": "S",
+    "params.threadId": "S"
    },
    "tier": "S"
   },
@@ -659,6 +679,25 @@
     "id": "S",
     "query": "S",
     "results": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadStatus.active": {
+   "names": {
+    "activeFlags": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadStatus.idle": {
+   "names": {
+    "type": "S"
+   },
+   "tier": "S"
+  },
+  "type ThreadStatus.systemError": {
+   "names": {
     "type": "S"
    },
    "tier": "S"
