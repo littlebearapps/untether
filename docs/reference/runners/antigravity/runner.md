@@ -403,7 +403,7 @@ never writes under `~/.gemini`.
   with a `hooks` key (even `hooks: []`) or front matter Untether can't read the way agy does, and every user-level
   agent (stat only, D33): agy's `-p /hooks` never lists an agent's hooks (probe 1032-0, agy 1.5.18); an unfinished
   scan, a failed `agy mcp list` or an unknown agy version.
-- **Scope and who.** One record per chat and project root (`antigravity_trust.json` beside `untether.toml`, written owner-only, 0600, since it can switch on the bypass). In a
+- **Scope and who.** One record per chat and project root (`antigravity_trust.json` beside `untether.toml`, written owner-only, 0600, since it can switch on the bypass; a copy anyone else can write, or owned by another user, trusts nothing). In a
   group only an admin can open the disclosure, trust, cancel or revoke (#1042 admin gate, refused before any toast).
   Crons and webhooks never use a record and never get a button; `/at` and loop fires count as attended.
 - **Still guaranteed in a trusted run:** every tool call reaches Untether's `PreToolUse` hook and needs its `allow`

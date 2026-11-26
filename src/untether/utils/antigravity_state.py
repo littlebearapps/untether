@@ -227,6 +227,10 @@ class TrustStore:
             if not stat.S_ISREG(st.st_mode) or st.st_ino != stamp[0]:
                 self._failed("not_a_regular_file")
                 return
+            # #1032: anyone else who can write it could plant a bypass record.
+            if st.st_mode & 0o022 or st.st_uid != os.geteuid():
+                self._failed("writable_by_others")
+                return
             with os.fdopen(fd, "rb", closefd=False) as handle:
                 data = json.loads(handle.read().decode("utf-8"))
         except (OSError, ValueError) as exc:

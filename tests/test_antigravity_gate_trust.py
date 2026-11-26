@@ -353,6 +353,13 @@ def _record(fp: str = "f" * 64) -> TrustRecord:
     )
 
 
+def _write_trust(tmp_path: Path, text: str) -> None:
+    # TrustStore ignores a file anyone else can write; it writes 0600 itself.
+    path = tmp_path / TRUST_FILENAME
+    path.write_text(text)
+    path.chmod(0o600)
+
+
 def _store(tmp_path: Path) -> TrustStore:
     return TrustStore(tmp_path / TRUST_FILENAME)
 
@@ -367,6 +374,16 @@ def test_trust_store_file_is_owner_only(tmp_path: Path) -> None:
     assert (tmp_path / TRUST_FILENAME).stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize("mode", [0o620, 0o602, 0o666])
+def test_trust_store_writable_by_others_trusts_nothing(
+    tmp_path: Path, mode: int
+) -> None:
+    # Another local user who can write the file could plant a record.
+    assert _store(tmp_path).set(1, "/p", _record())
+    os.chmod(tmp_path / TRUST_FILENAME, mode)
+    assert _store(tmp_path).get(1, "/p") is None
+
+
 def test_trust_store_missing_file_trusts_nothing(tmp_path: Path) -> None:
     assert _store(tmp_path).get(1, "/p") is None
 
@@ -374,7 +391,7 @@ def test_trust_store_missing_file_trusts_nothing(tmp_path: Path) -> None:
 def test_trust_store_corrupt_json_trusts_nothing_and_warns(tmp_path: Path) -> None:
     store = _store(tmp_path)
     assert store.set(1, "/p", _record())
-    (tmp_path / TRUST_FILENAME).write_text("{not json")
+    _write_trust(tmp_path, "{not json")
     with structlog.testing.capture_logs() as logs:
         assert store.get(1, "/p") is None
     assert [log for log in logs if log["event"] == "antigravity.trust.load_failed"]
@@ -396,9 +413,9 @@ _GOOD = {
     ],
 )
 def test_trust_store_wrong_version_trusts_nothing(tmp_path: Path, payload: Any) -> None:
-    (tmp_path / TRUST_FILENAME).write_text(json.dumps({"version": 1, "records": _GOOD}))
+    _write_trust(tmp_path, json.dumps({"version": 1, "records": _GOOD}))
     assert _store(tmp_path).get(1, "/p") is not None
-    (tmp_path / TRUST_FILENAME).write_text(json.dumps(payload))
+    _write_trust(tmp_path, json.dumps(payload))
     assert _store(tmp_path).get(1, "/p") is None
 
 
@@ -435,7 +452,7 @@ def test_trust_store_drops_records_with_wrong_types(
         "version": 1,
         "records": {"1|/p": {**rec, **bad}, "2|/p": rec},
     }
-    (tmp_path / TRUST_FILENAME).write_text(json.dumps(payload))
+    _write_trust(tmp_path, json.dumps(payload))
     store = _store(tmp_path)
     assert store.get(1, "/p") is None
     assert store.get(2, "/p") is not None
