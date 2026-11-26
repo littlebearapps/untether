@@ -159,3 +159,44 @@ def test_legacy_compaction_tags_still_decode():
     end = pi_schema.decode_event('{"type":"auto_compaction_end","aborted":false}')
     assert isinstance(start, pi_schema.AutoCompactionStart)
     assert isinstance(end, pi_schema.AutoCompactionEnd)
+
+
+# #1182: only a successful ``compaction_end`` is counted.
+
+
+def _end(payload: str) -> ActionEvent:
+    state = _make_state()
+    state.compaction_seq = 1
+    state.compaction_action_id = "compaction_1"
+    [event] = translate_pi_event(
+        pi_schema.decode_event(payload), title="pi", meta=None, state=state
+    )
+    assert isinstance(event, ActionEvent)
+    return event
+
+
+def test_compaction_end_success_flagged():
+    event = _end(
+        '{"type":"compaction_end","reason":"threshold",'
+        '"result":{"summary":"s","tokensBefore":150000},'
+        '"aborted":false,"willRetry":false}'
+    )
+    assert event.action.detail["compaction"] is True
+    assert event.action.detail["result"]["tokensBefore"] == 150000
+
+
+def test_compaction_end_failed_or_aborted_not_flagged():
+    for payload in (
+        '{"type":"compaction_end","aborted":true,"willRetry":false}',
+        '{"type":"compaction_end","aborted":false,"errorMessage":"boom"}',
+    ):
+        assert "compaction" not in _end(payload).action.detail
+    state = _make_state()
+    [started] = translate_pi_event(
+        pi_schema.decode_event('{"type":"compaction_start","reason":"manual"}'),
+        title="pi",
+        meta=None,
+        state=state,
+    )
+    assert isinstance(started, ActionEvent)
+    assert "compaction" not in started.action.detail

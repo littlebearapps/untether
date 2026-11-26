@@ -138,6 +138,14 @@ the older `auto_compaction_*` names still decode, #1239) and `auto_retry_*`
 become note actions; see [Untether events](untether-events.md)
 for the full mapping.
 
+Session compaction count ([#1182](https://github.com/littlebearapps/untether/issues/1182)): a `compaction_end` that is neither `aborted` nor
+carries `errorMessage` gets `detail["compaction"] = True`, and the bridge counts it
+per session in `session_costs.json`. Pi reports no context % on `--mode json`
+(`contextUsage` is RPC-only, `get_session_stats`, Pi 1.5.2), so the header shows the
+count on its own: `done · pi · 2m 10s · step 6 · 🗜️ 1`. If Pi promotes the session id
+mid-run (the supplementary `StartedEvent`), the count follows the new id, so that
+session restarts at 0.
+
 **Footer model display.** When no model override is set for the chat, Pi extracts the model name from the `message_end` JSONL event and emits a supplementary `StartedEvent` with populated `meta`. The base runner's `handle_started_event` passes this duplicate through whenever `event.meta` is truthy, and `ProgressTracker.note_event` merges meta idempotently, so the completion footer shows the actual default model instead of a blank. ([#225](https://github.com/littlebearapps/untether/issues/225))
 
 ---

@@ -237,6 +237,101 @@ def test_a_checkpoint_in_an_ordinary_run_is_not_a_manual_compaction() -> None:
     assert "compaction" not in done.usage
 
 
+# ── #1182: every DONE ``checkpoint`` step is one counted compaction ─────────
+
+# agy 1.5.17 auto compaction (probe 1182-0, AGY_CLI_AUTO_COMPACT_OVERRIDE=20K):
+# a ``checkpoint`` step mid-turn, after the tool output that crossed the
+# threshold, with no ``/compact``; the turn then answers normally.
+_AUTO = "be1cb8ef-84ce-409e-a2f7-cf9fda229e47"
+AUTO_COMPACT_LINES = [
+    json.dumps({"event": "init", "conversation_id": _AUTO, "init": {"cwd": "/p"}}),
+    *(
+        json.dumps(
+            {"event": "step_update", "step_update": {"conversation_id": _AUTO, **s}}
+        )
+        for s in (
+            {"step_index": 12, "state": "DONE", "step_type": "user_input"},
+            {"step_index": 13, "state": "DONE", "step_type": "system_message"},
+            {
+                "step_index": 16,
+                "state": "DONE",
+                "step_type": "checkpoint",
+                "duration_seconds": 11.39,
+                "usage": {
+                    "input_tokens": 13299,
+                    "output_tokens": 941,
+                    "thinking_tokens": 0,
+                    "cache_read_tokens": 6283,
+                    "total_tokens": 14240,
+                },
+            },
+            {
+                "step_index": 17,
+                "state": "DONE",
+                "step_type": "agent_response",
+                "text_delta": "done\n",
+            },
+        )
+    ),
+    json.dumps(
+        {
+            "event": "result",
+            "result": {
+                "conversation_id": _AUTO,
+                "status": "SUCCESS",
+                "response": "done\n",
+                "num_turns": 4,
+            },
+        }
+    ),
+]
+
+
+def _flagged(events: list[Any]) -> list[ActionEvent]:
+    return [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "completed"
+        and (e.action.detail or {}).get("compaction") is True
+    ]
+
+
+def test_compact_success_emits_flagged_telemetry() -> None:
+    events = _replay("/compact")
+    [flag] = _flagged(events)
+    assert flag.action.kind == "telemetry"  # no new row: the final says it
+    assert _completed(events).usage["compaction"] == MANUAL_SUCCESS
+
+
+def test_compact_without_checkpoint_emits_no_flag() -> None:
+    lines = [line for line in _fixture_lines() if '"checkpoint"' not in line]
+    assert _flagged(_replay("/compact", lines)) == []
+
+
+def test_normal_run_checkpoint_flagged() -> None:
+    """Probe 1182-0: agy reports its automatic compaction as a ``checkpoint``
+    step, so an ordinary run's checkpoint counts too (not a manual one)."""
+    events = _replay("read the file", AUTO_COMPACT_LINES, resume=None)
+    [flag] = _flagged(events)
+    assert flag.action.kind == "telemetry"
+    done = _completed(events)
+    assert done.answer.strip() == "done"
+    assert "compaction" not in (done.usage or {})
+
+
+def test_checkpoint_not_done_not_flagged() -> None:
+    lines = [
+        line.replace(
+            '"state": "DONE", "step_type": "checkpoint"',
+            '"state": "ERROR", "step_type": "checkpoint"',
+        )
+        for line in AUTO_COMPACT_LINES
+    ]
+    assert any('"ERROR"' in line for line in lines)
+    assert _flagged(_replay("read the file", lines, resume=None)) == []
+
+
 def test_compact_with_a_message_keeps_the_answer_under_a_confirmation() -> None:
     lines = _fixture_lines()
     result = json.loads(lines[-1])

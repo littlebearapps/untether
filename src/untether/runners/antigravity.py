@@ -3273,6 +3273,24 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if step_type == "checkpoint" and st == "DONE":
             # #1114: agy wrote a compaction checkpoint (agy 1.3.5).
             state.checkpoint_seen = True
+            # #1182: one compaction, `/compact` or automatic (probe 1182-0,
+            # agy 1.5.17). Telemetry: no row; the bridge counts it.
+            logger.info(
+                "antigravity.compaction",
+                session_id=state.session_id,
+                step_index=idx,
+                manual=state.compact is not None,
+            )
+            return [
+                *out,
+                state.factory.action_completed(
+                    action_id=f"antigravity.compaction.{idx}",
+                    kind="telemetry",
+                    title="compaction",
+                    ok=True,
+                    detail={"compaction": True},
+                ),
+            ]
         # user_input (incl. a hook-injected one: not a new run), system_message,
         # checkpoint, unknown, finish, anything newer.
         logger.debug("antigravity.step.ignored", step_type=step_type, state=st)

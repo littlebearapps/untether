@@ -2164,6 +2164,37 @@ def test_p8_compaction_row_and_count() -> None:
     assert counts == [1]
 
 
+def _note_actions(events: list[Any]) -> list[ActionEvent]:
+    return [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.action.kind == "note"
+        and e.action.title in {gate._COMPACTING_TITLE, gate._COMPACTED_TITLE}
+    ]
+
+
+def test_context_compaction_completed_row_flagged() -> None:
+    """#1182: the P8 ``contextCompaction`` completion is the counted event."""
+    _, compact = _p8_segments()
+    _, events = _replay(compact)
+    started, completed = _note_actions(events)
+    assert completed.phase == "completed"
+    assert completed.action.detail["compaction"] is True
+    assert "compaction" not in (started.action.detail or {})
+
+
+def test_context_compaction_started_row_not_flagged() -> None:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    item = {"type": "contextCompaction", "id": "cc1"}
+    events = _translate(runner, state, *_item("item/started", item))
+    events += _translate(runner, state, *_turn_completed("interrupted"))
+    assert _note_actions(events)
+    for row in _note_actions(events):
+        assert "compaction" not in (row.action.detail or {})
+
+
 def test_compaction_wording_matches_claude() -> None:
     from untether.runners import claude
 
