@@ -351,6 +351,35 @@ for line in sys.stdin:
         out({"method": "thread/started", "params": {"thread": thread(tid)}})
         if SC.get("stop_reading_after_thread"):
             time.sleep(30)
+    elif method == "turn/steer":  # #964 (P-S1 shape, 0.171.0)
+        p = msg["params"]
+        if SC.get("steer_complete_first"):
+            out({"method": "turn/completed", "params": {"threadId": p["threadId"],
+                 "turn": {"id": "turn-1", "status": "completed", "items": [],
+                          "error": None}}})
+        if SC.get("steer_no_response"):
+            continue
+        if SC.get("steer_error"):
+            out({"id": rid, "error": {"code": -32600, "message": SC["steer_error"],
+                 "data": SC.get("steer_error_data")}})
+            if SC.get("complete_after_steer"):
+                out({"method": "turn/completed", "params": {"threadId": p["threadId"],
+                     "turn": {"id": "turn-1", "status": "completed", "items": [],
+                              "error": None}}})
+            continue
+        out({"id": rid, "result": {"turnId": p["expectedTurnId"]}})
+        if SC.get("steer_then_exit"):
+            sys.exit(0)
+        out({"method": "item/started", "params": {"threadId": p["threadId"],
+             "turnId": "turn-1", "item": {"type": "userMessage", "id": "um-s",
+             "clientId": p.get("clientUserMessageId"), "content": p["input"]}}})
+        if SC.get("complete_after_steer"):
+            out({"method": "item/completed", "params": {"threadId": p["threadId"],
+                 "turnId": "turn-1", "item": {"type": "agentMessage", "id": "m-s",
+                 "text": "done steered", "phase": "final_answer"}}})
+            out({"method": "turn/completed", "params": {"threadId": p["threadId"],
+                 "turn": {"id": "turn-1", "status": "completed", "items": [],
+                          "error": None}}})
     elif method == "thread/compact/start":  # #964 (P-C shape, 0.171.0)
         tid = msg["params"]["threadId"]
         if SC.get("compact_error"):

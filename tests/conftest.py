@@ -91,12 +91,15 @@ def _isolated_codex_reads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """#966/#846: the Codex read caches are module state, and the DEC-27
     warm-up would spawn an unexpected ``app-server`` from a fake ``codex``.
     Off and empty per test; ``tests/test_codex_reads.py`` turns it on."""
-    from untether.runners import codex_reads
+    from untether.runners import codex_app_server, codex_reads
 
     monkeypatch.setattr(codex_reads, "WARMUP_ENABLED", False)
+    # #964: build_runner sets the app-server steer flag; restore it per test.
+    monkeypatch.setattr(codex_app_server, "APP_SERVER_ACTIVE", False)
     codex_reads.reset_caches()
     yield
     codex_reads.reset_caches()
+    codex_app_server._RUNS_BY_THREAD.clear()
 
 
 @pytest.fixture(autouse=True)

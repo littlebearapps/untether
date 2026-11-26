@@ -99,6 +99,8 @@ def fallback_notice(reason: FallbackReason, engine: str) -> str:
         )
     if engine == "antigravity":
         return f"{arrow} No running Antigravity turn to steer — queued instead."
+    if engine == "codex":
+        return f"{arrow} No running Codex turn to steer — queued instead."
     return f"{arrow} No live Claude run to steer — queued instead."
 
 

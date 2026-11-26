@@ -1425,10 +1425,14 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
         extra_args.extend(["--profile", profile_value])
         title = profile_value
 
-    if app_server:
-        from .codex_app_server import CodexAppServerRunner  # imports this module
+    from . import codex_app_server  # imports this module
 
-        return CodexAppServerRunner(codex_cmd=codex_cmd, extra_args=extra_args)
+    # #964: steer needs app-server; exec keeps "Steer isn't supported".
+    codex_app_server.APP_SERVER_ACTIVE = app_server
+    if app_server:
+        return codex_app_server.CodexAppServerRunner(
+            codex_cmd=codex_cmd, extra_args=extra_args
+        )
     return CodexRunner(codex_cmd=codex_cmd, extra_args=extra_args, title=title)
 
 

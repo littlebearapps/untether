@@ -249,6 +249,8 @@ def live_backend(engine: str | None) -> LiveSessionBackend | None:
 # paths must not see it). Resolved lazily: the module imports the registry.
 _STEER_ONLY: dict[str, tuple[str, str]] = {
     "antigravity": ("untether.antigravity.gate_server", "STEER_BACKEND"),
+    # #964: ``turn/steer`` into the running app-server turn (per-run process).
+    "codex": ("untether.runners.codex_app_server", "STEER_BACKEND"),
 }
 
 
