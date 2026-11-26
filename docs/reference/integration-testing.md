@@ -90,7 +90,7 @@ These tests were previously considered "manual" but can be automated via MCP and
 | Capability | Claude | Codex | OpenCode | Pi | Antigravity | Gemini ⚠️ | Amp ⚠️ |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Support status** | Yes | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
-| Interactive approval | Yes | - | - | - | Yes (Ask me, agy plugin) | Flag only | - |
+| Interactive approval | Yes | Yes (app-server) | - | - | Yes (Ask me, agy plugin) | Flag only | - |
 | Plan mode | Yes | - | - | - | Yes (Plan first) | - | - |
 | Ask questions | Yes | - | - | - | Yes (agy plugin) | - | - |
 | Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
@@ -98,9 +98,9 @@ These tests were previously considered "manual" but can be automated via MCP and
 | Reasoning levels | Yes | Yes | - | - | Yes (per model) | - | - |
 | API cost tracking | Yes | - | Yes | - | - (tokens only) | Yes | Yes |
 | Subscription usage | Yes | - | - | - | Quota groups (`/usage`) | - | - |
-| Diff preview | Yes | - | - | - | Yes (Ask me, agy plugin) | - | - |
-| Steer follow-ups | Yes | - | - | - | Yes (agy plugin) | - | - |
-| Live sessions | Yes | - | - | - | - (one `agy` run per message) | - | - |
+| Diff preview | Yes | Yes (app-server) | - | - | Yes (Ask me, agy plugin) | - | - |
+| Steer follow-ups | Yes | Yes (app-server) | - | - | Yes (agy plugin) | - | - |
+| Live sessions | Yes | Yes (app-server) | - | - | - (one `agy` run per message) | - | - |
 
 Antigravity has four permission modes. Two are picked before the run and were all 0.36.1rc1 had: **Workspace** (the
 default: `agy`'s own `--mode=accept-edits` under Untether's no-shell agent, so file edits inside the project and no
@@ -287,12 +287,21 @@ Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex w
 | CX-21a | **Web search Off** | Off; same prompt | No web-search row; Codex says it can't search |
 | CX-21b | **Resume keeps setting** | reply to the CX-21 resume line with Off set | `thread/resume.config.web_search = "disabled"` in the log; note #62144 provider pinning if a search still happens |
 | CX-21c | **`--remote` refused** | Add `extra_args = ["--remote", "ws://127.0.0.1:1"]` to the dev config | Reload fails naming `--remote` (not the value), the previous config stays in effect; remove it |
+| CX-22 | **Live follow-up** ([#964](https://github.com/littlebearapps/untether/issues/964)) | U1, then a follow-up within 30 s | Same `codex app-server` PID; `codex.live_session.injected`; `turn_started reason=followup`; `turn/start` carries `clientUserMessageId`; the reply threads under the follow-up |
+| CX-23 | **Steer** (#964) | Follow-up mode steer (or `/steer <text>`) while a turn runs `sleep 30` | `steer.written … mid_turn=True` and `codex.app_server.steer_accepted turn_id=…` (the running turn, sent as `expectedTurnId`), then `steer_delivered`; `↪️ Steered into the current run.`; `↪️ steer received` row; one final covering both |
+| CX-24 | **Queue** (#964) | Follow-up mode queue; a second prompt while the first turn runs | The second prompt's `turn/start` only after `turn/completed`, on the same PID; two finals in order |
+| CX-25 | **Steer fallback** (#964) | `/compact` on a thread with a session, then `/steer x` while it compacts | `codex.app_server.steer_refused reason='cannot steer a compact turn'`; "The current run is ending — queued instead."; x runs after the compaction |
+| CX-26 | **`/compact`** (#964) | In a chat with a session (live or idle): bare `/compact`; then `/new` and `/compact` again | Idle (no live session): `preamble.skipped reason=native_command` and `codex.app_server.compact_started`; live: `codex.live_session.injected` then `runner.completed compaction_trigger=manual` (the injected request logs no `compact_started`); both: 🗜️ row, `session.compaction_counted count=N` once; `🗜️ Context compacted (manual)`; with no session "Nothing to compact…" (`compact_no_conversation`) and nothing spawned |
+| CX-27 | **Idle close, `/cancel`, `/new`** (#964) | Wait past 60 s after an answer; then `/cancel` on an idle session; then `/new` on an idle session | Process gone each time: `codex.live_session.stdin_closed reason=idle_no_tasks`, then `reason=cancel` for both `/cancel` and `/new` (`/new` closes through the shared cancel path); `closed quarantined=False`; replies per #902/#895 |
+| CX-28 | **Options change** (#964) | `/model set <other>` while a session is live, then a prompt | `codex.live_session.options_changed`; the old PID exits; the prompt resumes the same thread on a new PID with the new model |
+| CX-29 | **Death notice** (#964) | `kill -TERM` the idle session's `codex app-server` PID | `codex.live_session.died_unexpectedly`; "⚠️ The Codex session ended unexpectedly"; the next message resumes the thread |
+| CX-30 | **Restart drain + steer on exec** (#964) | B4 with a live Codex session; then `transport = "exec"` and `/steer x` while a run works | Clean drain (`shutdown.live_sessions_closed`); on exec "↪️ Steer isn't supported on codex — queued instead." (unchanged) |
 | CX-38 | **Session approval** | Ask before writes; `create a.txt, then append to a.txt`; tap 🔁 Allow for session on the first | Second write doesn't prompt (same run) |
 | CX-39 | **Sub-agent** | Ask before writes; `use a sub-agent to create child.txt` | Card says "(sub-agent)" and shows the diff; Approve → file exists |
 | CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 5 tiers, then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
 | CX-41 | **Untrusted project** | Record `sha256sum ~/.codex/config.toml`. Ask me, `Reply PONG`: (a) flat: a project with no `[projects]` entry; (b) nested ([#1408](https://github.com/littlebearapps/untether/issues/1408)): a git repo inside a listed folder, with no entry of its own; (c) shadowing: a subfolder whose own entry has no `trust_level`, inside a trusted repo; (d) control: a subfolder of the trusted `codex-test` | (a)–(c): log `codex.app_server.untrusted_read_only cwd=… repo_root=…`, `sandbox: read-only` sent, ⚠️ row; (d): `workspace-write`, no row; the sha is unchanged after all four and no new `[projects."…"]` key appears |
 
-CX-19…CX-21b run on both transports unless the row says otherwise.
+CX-19…CX-21b run on both transports unless the row says otherwise. CX-22…CX-29 need app-server with `[watchdog] live_sessions` on (the default); re-run CX-6, CX-11 and CX-15 inside a follow-up turn when the live-session code changes.
 
 Untrusted project (P1): CX-1 in a project with no `[projects]` entry in `~/.codex/config.toml` and a writable
 `sandbox_mode` shows the ⚠️ read-only row, and `~/.codex/config.toml` is unchanged afterwards (`cmp` against a
@@ -573,7 +582,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1, R20-922a…c (usage-credits cap latch) |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7, R20-919a…d + R20-920a…e (approval reminders) |
-| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `scheduler.py`) | B-LIVE-1…7, RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `live_sessions.py`, `telegram/steer.py`, `scheduler.py`) | B-LIVE-1…7, CX-22…CX-30 (Codex app-server), RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
 | Claude hooks / `--include-hook-events` (`runners/claude.py` hook frames, SDK hook callbacks) | RC14-6, R17-828, R20-923, R20-925a/d/h (hook callbacks on every control-channel spawn) |
 | Loop scheduling (`loop_scheduler.py`, `telegram/loop.py`, `[loop]` settings, Claude CronCreate/CronDelete/ScheduleWakeup handling) | R20-925a…m, R20-926a…c, R17-01d, U6, Q16 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
@@ -593,7 +602,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
-| Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, and the drift row above |
+| Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, CX-22…CX-30 (live sessions, steer, `/compact`), and the drift row above |
 | Codex approvals and tiers (`runners/codex_approvals.py`, the tiers in `runners/codex_app_server.py`, Codex rows of `runners/run_options.py` and `commands/config.py`) | CX-11…CX-18, CX-38…CX-41, CX-21c, plus Tier 4 O2 on Codex |
 | Codex reads, quota footer, reasoning, web search (`runners/codex_reads.py`, `telegram/commands/usage.py`, the Codex rows of `engine_overrides.py` / `commands/config.py` / `runner_bridge.py` footer) | CX-19…CX-21b, Tier 1 U1 on Codex (both transports), Tier 4 O2 on Codex |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, CX-10, CX-21c, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |
