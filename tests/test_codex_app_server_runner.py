@@ -789,6 +789,40 @@ async def test_linked_worktree_fails_closed(
     assert _trust_rows(events) == ["codex.untrusted_read_only"]
 
 
+def test_git_repo_root_mirrors_codex_head_rule(project: Path) -> None:
+    # Codex's trust walk (trust.rs resolve_root) stops at a `.git` dir with
+    # HEAD even if git itself rejects the repo, and skips one without HEAD.
+    _git("init", cwd=project)
+    bogus = project / "bogus"
+    (bogus / ".git").mkdir(parents=True)
+    (bogus / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    headless = project / "headless"
+    (headless / ".git").mkdir(parents=True)
+    assert gate.git_repo_root(bogus) == str(bogus)
+    assert gate.git_repo_root(headless) == str(project)
+    (project / "linked").mkdir()
+    (project / "linked" / ".git").symlink_to(project / ".git")
+    assert gate.git_repo_root(project / "linked") is None
+
+
+@pytest.mark.anyio
+async def test_invalid_nested_repo_with_head_runs_read_only(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # Codex's review (#1408): git ignores a nested `.git` holding only HEAD
+    # and finds the trusted parent, but Codex picks the nested root.
+    _git("init", cwd=project)
+    nested = project / "nested"
+    (nested / ".git").mkdir(parents=True)
+    (nested / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    fake = Fake(tmp_path, config=trusted)
+    with _cwd(nested):
+        events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+    assert _trust_rows(events) == ["codex.untrusted_read_only"]
+
+
 @pytest.mark.anyio
 async def test_separate_git_dir_fails_closed(
     tmp_path: Path, project: Path, gate_calls: list[str]

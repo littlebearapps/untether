@@ -53,7 +53,6 @@ from ..schemas.codex_app_server import (
 )
 from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
-from ..utils.git import git_stdout
 from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
@@ -507,16 +506,26 @@ def selected_project_entry(projects: Any, cwd: str, repo_root: str | None) -> An
 
 
 def git_repo_root(cwd: Path) -> str | None:
-    """*cwd*'s git repo root for the trust lookup, or None unless
-    ``<toplevel>/.git`` is a real directory. Linked worktrees, submodules and
-    ``--separate-git-dir`` checkouts fail closed (#1408; worktrees: #1413)."""
-    top = git_stdout(
-        ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
-    )
-    if top is None:
-        return None
-    dot_git = Path(top) / ".git"
-    return top if dot_git.is_dir() and not dot_git.is_symlink() else None
+    """*cwd*'s repo root as Codex finds it for trust (codex-cli 0.171.0
+    ``git-utils/src/trust.rs`` ``resolve_root``): walk up from *cwd* to the
+    first ``.git``; a ``.git`` directory without ``HEAD`` is skipped. Only a
+    real ``.git`` directory with ``HEAD`` yields a root: a ``.git`` file
+    (linked worktree, submodule, ``--separate-git-dir``) or any symlink fails
+    closed (#1408; worktrees: #1413). No ``git`` call, so no hang and no
+    divergence from Codex's filesystem walk."""
+    base = cwd if cwd.is_dir() else cwd.parent
+    for candidate in (base, *base.parents):
+        dot_git = candidate / ".git"
+        if not os.path.lexists(dot_git):
+            continue
+        if dot_git.is_symlink() or not dot_git.is_dir():
+            return None
+        head = dot_git / "HEAD"
+        if head.is_symlink():
+            return None
+        if os.path.lexists(head):
+            return str(candidate)
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,10 +715,6 @@ class CodexAppServerRunner(CodexRunner):
         # Stdin stays open. Only *write* initialize: the base starts reading
         # stdout after this returns, so nothing may wait for an answer here.
         state.proc = proc
-        if state.check_trust:
-            state.repo_root = await anyio.to_thread.run_sync(
-                git_repo_root, Path(state.cwd)
-            )
         state.peer = CodexRpcPeer(
             proc.stdin.send,
             write_timeout=self.write_timeout_s,
@@ -1413,6 +1418,9 @@ class CodexAppServerRunner(CodexRunner):
         is none) saves the project as trusted."""
         config = result.get("config") if isinstance(result, dict) else None
         config = config if isinstance(config, dict) else {}
+        # Resolved here, right before the sandbox goes out, to keep the
+        # window before Codex's own lookup small (#1408).
+        state.repo_root = git_repo_root(Path(state.cwd))
         entry = selected_project_entry(
             config.get("projects"), state.cwd, state.repo_root
         )
