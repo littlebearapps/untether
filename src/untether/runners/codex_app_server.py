@@ -694,8 +694,11 @@ class AppServerRunState(CodexRunState):
     completed_turns: int = 0
     turn_reason: str = "unknown"
     turn_command_uuid: str | None = None
-    # The follow-up turn/start in flight (one at a time).
+    # The follow-up turn/start in flight (one at a time), and the request id
+    # of every follow-up start not yet answered: a late answer to one whose
+    # waiter was dropped is recognised and ignored (review H1).
     pending_start: _StartWait | None = None
+    followup_rids: set[int] = field(default_factory=set)
     # Set when the run ends; the thread stays owned until the process exits.
     closing: bool = False
     # ``clock.sleep`` items by id → monotonic deadline; duck-typed by the
@@ -1586,9 +1589,14 @@ class CodexAppServerRunner(CodexRunner):
             # #964: the steer's own answer; never the run's error.
             self._on_steer_response(msg, state)
             return []
-        wait = state.pending_start
-        if msg.method == "turn/start" and wait is not None and msg.id == wait.rid:
-            return self._on_start_response(msg, state, wait)  # never the run's error
+        if msg.method == "turn/start" and msg.id in state.followup_rids:
+            # A follow-up's answer: never the run's error, never the turn id.
+            state.followup_rids.discard(msg.id)  # type: ignore[arg-type]
+            wait = state.pending_start
+            if wait is not None and msg.id == wait.rid:
+                return self._on_start_response(msg, state, wait)
+            logger.info("codex.app_server.followup_late_answer", rid=msg.id)
+            return []
         if msg.error is not None:
             # Codex's own text: the bridge matches "no rollout found" (#952).
             return [
@@ -2380,6 +2388,7 @@ async def start_followup(
         # Before the write, with no await since the checks above.
         wait.rid = rid
         state.pending_start = wait
+        state.followup_rids.add(rid)
 
     params = {
         "threadId": state.thread_id,

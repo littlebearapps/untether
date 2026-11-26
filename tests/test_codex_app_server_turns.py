@@ -21,6 +21,7 @@ deadline the bridge's stall monitor reads as an expected wait.
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,7 @@ from untether.interactive.registry import Decision
 from untether.model import ActionEvent, CompletedEvent, ResumeToken, TurnEvent
 from untether.runners import codex_app_server as gate
 from untether.runners import codex_approvals as approvals
-from untether.runners.codex_rpc import Response
+from untether.runners.codex_rpc import CodexRpcPeer, Response
 from untether.runners.run_options import apply_run_options
 
 project = _rt.project
@@ -316,6 +317,7 @@ def test_response_naming_an_open_turn_of_another_owner_is_absorbed() -> None:
     wait = gate._StartWait(command_uuid="f1", text="hello there")
     wait.rid = 9
     state.pending_start = wait
+    state.followup_rids.add(9)
     state.inbound = Response(9, "turn/start", result={"turn": {"id": "turn-s"}})
     events = runner.translate(b"", state=state, resume=None, found_session=None)
     assert wait.absorbed and wait.done.is_set()
@@ -608,3 +610,76 @@ def test_sleep_item_row_and_wakeup_deadline() -> None:
     [done] = _translate(runner, state, "item/completed", params)
     assert done.phase == "completed" and done.ok
     assert state.live_wakeups == {}
+
+
+# --- Codex adversarial review of 964-3a (2026-11-26) --------------------------
+
+
+class _Sink:
+    """A peer transport: records each line; ``gate`` holds the write."""
+
+    def __init__(self) -> None:
+        self.lines: list[dict] = []
+        self.gate: anyio.Event | None = None
+
+    async def send(self, data: bytes) -> None:
+        if self.gate is not None:
+            await self.gate.wait()
+        self.lines.append(json.loads(data))
+
+
+def _live_state(sink: _Sink) -> tuple[Any, Any]:
+    runner = _bare_runner()
+    state = _app_state(runner)
+    state.live_mode = True
+    state.completed_turns = 1
+    state.peer = CodexRpcPeer(sink.send)
+    return runner, state
+
+
+def _turn(turn_id: str, status: str = "inProgress") -> dict:
+    return {"threadId": THREAD, "turn": {"id": turn_id, "status": status, "items": []}}
+
+
+def _answer(runner: Any, state: Any, rid: int, turn_id: str) -> list[Any]:
+    state.inbound = Response(rid, "turn/start", result={"turn": {"id": turn_id}})
+    try:
+        return runner.translate(b"", state=state, resume=None, found_session=None)
+    finally:
+        state.inbound = None
+
+
+async def _wait_for(pred: Any) -> None:
+    with anyio.fail_after(2):
+        while not pred():
+            await anyio.sleep(0.001)
+
+
+@pytest.mark.anyio
+async def test_late_answer_of_a_dropped_start_never_moves_the_current_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H1: the follow-up's turn started, but Codex's answer came after
+    the waiter timed out, and a later turn is running when it lands. It must
+    not become the current turn id (``/cancel`` would interrupt the old turn
+    and the real turn's completion would be rejected as stale)."""
+    monkeypatch.setattr(gate, "FOLLOWUP_RESPONSE_S", 0.05)
+    sink = _Sink()
+    runner, state = _live_state(sink)
+    outcome: list[str] = []
+
+    async def start() -> None:
+        outcome.append(await gate.start_followup(state, "x", command_uuid="f1"))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(start)
+        await _wait_for(lambda: sink.lines)
+        _translate(runner, state, "turn/started", _turn("turn-2"))
+    assert outcome == ["started"] and state.pending_start is None
+    rid = sink.lines[0]["id"]
+    _translate(runner, state, "turn/completed", _turn("turn-2", "completed"))
+    _translate(runner, state, "turn/started", _turn("turn-3"))  # Codex's own
+    assert _answer(runner, state, rid, "turn-2") == []
+    assert state.turn_id == "turn-3"
+    [done] = _translate(runner, state, "turn/completed", _turn("turn-3", "completed"))
+    assert isinstance(done, TurnEvent) and (done.phase, done.turn) == ("completed", 3)
