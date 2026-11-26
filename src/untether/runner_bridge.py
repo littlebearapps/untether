@@ -1054,7 +1054,7 @@ def _load_preamble_settings():
         return PreambleSettings()
 
 
-def _apply_preamble(prompt: str, engine: str) -> str:
+def _apply_preamble(prompt: str, engine: str, *, transport: str | None = None) -> str:
     """Prepend the context preamble to the prompt if enabled.
 
     Capability-driven (#558, D23): only engines with question buttons are
@@ -1062,10 +1062,14 @@ def _apply_preamble(prompt: str, engine: str) -> str:
     get the plan-mode block. Claude's text is byte-identical to before; a
     ``[preamble] text`` override is used verbatim for every engine.
     """
-    if engine == "antigravity":
-        from .utils.antigravity_argv import native_compact_prompt
+    if engine == "antigravity" or (engine == "codex" and transport == "app-server"):
+        from .utils.antigravity_argv import COMPACT_COMMAND, native_compact_prompt
 
-        if native_compact_prompt(prompt) is not None:
+        native = native_compact_prompt(prompt)
+        # #964: Codex takes only a bare /compact (D6); with text it's a prompt.
+        if native is not None and (
+            engine == "antigravity" or native == COMPACT_COMMAND
+        ):
             # #1114: agy's own /compact must reach it as the command itself;
             # the preamble in front would make it text for the model.
             logger.info("preamble.skipped", reason="native_command")
@@ -7850,7 +7854,9 @@ async def handle_message(
     is_resume_line = runner.is_resume_line
     resume_strip = strip_resume_line or is_resume_line
     runner_text = _strip_resume_lines(incoming.text, is_resume_line=resume_strip)
-    runner_text = _apply_preamble(runner_text, runner.engine)
+    runner_text = _apply_preamble(
+        runner_text, runner.engine, transport=getattr(runner, "transport", None)
+    )
 
     progress_tracker = ProgressTracker(engine=runner.engine, clock=clock)
     # rc4 (#271): seed trigger source into meta so the footer renders it.

@@ -345,6 +345,25 @@ async def test_non_claude_engine_falls_back(explicit: bool) -> None:
     assert "codex" in _texts(cfg)[0]
 
 
+async def test_codex_compact_is_never_steered() -> None:
+    """#964: Codex's bare /compact is its own run (thread/compact/start);
+    it queues quietly, while /compact <text> is a prompt like any other."""
+    cfg = _cfg("steer")
+    running = {MessageRef(channel_id=CHAT, message_id=9): _Busy()}
+    token = ResumeToken(engine="codex", value="thread-1")
+    with structlog.testing.capture_logs() as logs:
+        ok = await _steer(
+            cfg, engine="codex", token=token, running=running, text="/compact"
+        )
+    assert ok is False
+    assert _texts(cfg) == []
+    assert [log["reason"] for log in logs if log["event"] == "steer.skipped"] == [
+        "native_command"
+    ]
+    await _steer(cfg, engine="codex", token=token, running=running, text="/compact x")
+    assert _texts(cfg) == [fallback_notice("engine", "codex")]
+
+
 async def test_live_backend_without_steer_falls_back_with_engine_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

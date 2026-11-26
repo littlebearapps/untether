@@ -62,6 +62,12 @@
    },
    "tier": "S"
   },
+  "client_request thread/compact/start": {
+   "names": {
+    "params.threadId": "S"
+   },
+   "tier": "S"
+  },
   "client_request thread/list": {
    "names": {
     "params.ancestorThreadId": "E",
