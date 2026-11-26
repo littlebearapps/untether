@@ -470,6 +470,7 @@ class GateRun:
         channel_id: int | None = None,
         outbox_dir: str = gate_policy.DEFAULT_OUTBOX_DIR,
         outside: tuple[Path, ...] = (),
+        trust_protected: tuple[str, ...] | None = None,
     ) -> None:
         self.key = secrets.token_hex(6)
         self.session_key = f"agy-gate:{self.key}"
@@ -490,6 +491,9 @@ class GateRun:
         # and the projects' ``@branch`` worktree roots (outside the project).
         self.outbox_dir = outbox_dir
         self.outside = outside
+        # #1032: a run that uses "Trust current config" protects what the
+        # trusted hooks run (``gate_policy._trust_input``); None otherwise.
+        self.trust_protected = trust_protected
         # The agy process this run spawned (L1: hook connections must come
         # from below it); set by the runner at spawn.
         self.agy_pid: int | None = None
@@ -990,6 +994,7 @@ class GateRun:
                 outside=self.outside,
                 config_path=self.config_path,
                 artifact_path=payload.get("artifactDirectoryPath"),
+                trust_protected=self.trust_protected,
             )
             if own
             # A conversation Untether didn't start (13 §5): never on the

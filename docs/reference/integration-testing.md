@@ -107,7 +107,7 @@ default: `agy`'s own `--mode=accept-edits` under Untether's no-shell agent, so f
 shell) and **Full access** (explicit). From 0.36.1rc4 **Plan first** runs too (agy's `--mode=plan`; the plan is answered with Approve / Deny / Let's discuss,
 [#981](https://github.com/littlebearapps/untether/issues/981)), and **Ask me** asks in Telegram before shell, web, MCP
 and files outside the project, once Untether's agy plugin is installed
-([#980](https://github.com/littlebearapps/untether/issues/980); AG-49 to AG-58; trusting agy config Untether doesn't manage: AG-61 to AG-61g, [#1032](https://github.com/littlebearapps/untether/issues/1032)). Question buttons and steer need the
+([#980](https://github.com/littlebearapps/untether/issues/980); AG-49 to AG-58; trusting agy config Untether doesn't manage: AG-61 to AG-61h, [#1032](https://github.com/littlebearapps/untether/issues/1032)). Question buttons and steer need the
 same plugin (AG-27 to AG-34). A blocked tool shows as a `⚠️ Blocked: …` progress row.
 
 ---
@@ -1842,6 +1842,7 @@ conversation for them, or have him run those steps by hand; never work around th
 | AG-61e cron never uses it | With AG-61's record (the `Stop` group again, trusted): a one-minute dev cron for the project with `permission_mode = "ask"` | Refused, no button | `gate_refused reason=gate_foreign_config`; `precheck_failed … trust=unattended`; no `config_trust_used` / `config_trust_offered` |
 | AG-61f group non-admin | In the dev group, a non-admin member taps **🔓 Trust current config…** (and ✅ Trust / Cancel on an admin's disclosure) | Toast "changing settings is restricted to group admins." each time; the message is unchanged; nothing written | `command.admin_required command=agy_trust` (ids only); no `antigravity.config_trusted` |
 | AG-61g change during run | Trusted (AG-61); ``Append one space to the end of the file .agents/hooks.json using a shell command, then say done.``; approve | The run finishes; its ⚠️ changed row adds "Trust for Ask me was removed; the next Ask me message asks again."; the next Ask me message is refused with a button | `antigravity.workspace_config_changed`; `antigravity.config_trust_revoked reason=changed_during_run` |
+| AG-61h trusted hook inputs ([#1032](https://github.com/littlebearapps/untether/issues/1032), Codex review finding 1) | In the test project add `package.json` with `{"scripts": {"check": "echo ok"}}`; make the `lint` group's `Stop` hook `npm run check`; trust it (AG-61's taps); then in Ask me: `Change the check script in package.json to echo changed.` and, separately, `Append the line "hello" to README.md.` | The package.json edit gets a pushed card `… write a file (a protected file in this project)` with the diff; tap ❌ Deny and the file is unchanged. The README.md edit runs without a card. In an untrusted Ask me chat (no foreign config) the package.json edit runs without a card, as before | `antigravity.config_trust_used`; `antigravity.gate.card … why=protected` for `package.json`; `antigravity.gate.decision tool=write_to_file decision=deny source=user`; README.md: `decision=allow source=policy` |
 
 ### #906 — webhook and cron triggers
 

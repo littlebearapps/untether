@@ -408,10 +408,32 @@ never writes under `~/.gemini`.
   Crons and webhooks never use a record and never get a button; `/at` and loop fires count as attended.
 - **Still guaranteed in a trusted run:** every tool call reaches Untether's `PreToolUse` hook and needs its `allow`
   (safe list) or your tap; the liveness check and tripwire still apply; MCP tool calls still always ask.
+- **What the trusted hooks run is protected during the run** (Codex review finding 1, Nathan's decision
+  2026-11-26): in a run that uses a trust record, an edit or write to any of these asks with a card (`a protected
+  file in this project`), never the safe list. Deletes, moves and new symlinks go through the shell, which always
+  asks. Untrusted Ask me runs are unchanged.
+  - every file of the fingerprinted agy set (hook manifests and the scripts they name by literal path), and every
+    path a listed hook command names (`./x.sh`, `scripts/lint.py`: any token with a `/` or a script suffix,
+    against the project root and the run folder), plus the file and package folder of a `-m <module>`
+    (`gate_trust.protected_inputs`);
+  - whatever the hook commands say, runner manifests at any depth (`gate_policy.TRUST_MANIFEST_NAMES`):
+    `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `.yarnrc(.yml)`, `.pnp.cjs`,
+    `.pnp.loader.mjs`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.pnpmfile.cjs`, `bun.lock(b)`, `bunfig.toml`,
+    `.npmrc`, `deno.json(c)`, `deno.lock`, `Makefile`, `GNUmakefile`, `*.mk`, `justfile`, `.justfile`,
+    `Taskfile.yml(.yaml)`, `Rakefile`, `pyproject.toml`, `setup.py`, `setup.cfg`, `requirements*.txt` / `.in`,
+    `uv.lock`, `poetry.lock`, `Pipfile(.lock)`, `tox.ini`, `noxfile.py`, `conftest.py`, `pytest.ini`,
+    `sitecustomize.py`, `usercustomize.py`, `Cargo.toml`, `Cargo.lock`, `build.rs`, `go.mod`, `go.sum`, `go.work`,
+    `Gemfile(.lock)`, `composer.json` / `.lock`; and anything under `node_modules/`, `.venv/`, `venv/`,
+    `__pypackages__/`, `.yarn/`, `.cargo/` (`TRUST_DIR_NAMES`). Names are casefolded on every platform; the
+    usual path checks (plain absolute paths only, no symlink on the way, no hard links) still apply first.
 - **Not covered (the risk the admin accepts):** the trusted hooks' own commands run without asking, see each call's
   arguments and the prompt, and can add instructions or keep a turn going; trusted MCP servers start and run
-  unprompted; programs they reach outside the fingerprint (`npx` packages, `PATH` lookups, scripts named by
-  user-level hooks) can change without the digest changing; a change made and reverted between two checks.
+  unprompted; code they reach outside the project or the protected list can change without the digest changing
+  (`npx`-fetched packages, `PATH` lookups, scripts named by user-level hooks, and source files a manifest's script
+  runs, such as `scripts/check.js` behind `npm run check`, or a module `python -m` imports beyond its own package);
+  and a config swap between Untether's pre-spawn checks and agy loading the config (Codex review finding 2:
+  accepted residual, the same window an untrusted Ask me run has; the post-run re-scan revokes, but a change
+  reverted before it is invisible).
 - **Fails closed.** A missing, unreadable, corrupt, wrong-version or symlinked trust file means no records; a record
   with a wrong-typed field is dropped; a failed save reports "Nothing was trusted". A change to the agy set seen by
   the post-run re-scan, or a re-scan that fails or times out, removes the record (`reason=changed_during_run` /
@@ -1085,7 +1107,7 @@ rows give their own version and date (latest: agy 1.5.18, 2026-11-26).
 | Plan first ([#981](https://github.com/littlebearapps/untether/issues/981)) | `--mode=plan` under the no-shell agent; approve = `--conversation=<id> --mode=accept-edits`; revise = `--conversation=<id> --mode=plan` | Partly **custom**: agy has no headless "plan ready" signal (`result` and `init.permission_mode` are the same as any turn's) and no way to answer a plan from print mode, so Untether detects the plan from the finished `write_to_file` into `brain/<conversation id>/`, reads that one file and its sidecar (realpath-contained; the D33 exception extended to this file), and keeps the pending-card store itself. agy 1.3.2's `artifactReviewPolicy` is a settings key (changing it would edit the user's agy settings). Checked 2026-10-12/13, agy 1.3.3. Retire when the stream carries the plan or agy can wait for a review headless |
 | `/export` | — (**custom**: Untether's in-memory record of the events it saw) | agy writes `transcript_full.jsonl` under `brain/<id>/` but has no export command or flag for it, and reading it is rule 3 (an engine state file, holding whole file contents). Not read. Checked 2026-10-12, agy 1.3.3 |
 | A trigger's wall-clock limit (`max_elapsed_s`, [#1125](https://github.com/littlebearapps/untether/issues/1125)) | `--print-timeout=<n>s` | **Partial**: on expiry agy reports `SUCCESS` with a partial answer and prints `[agy] print timeout after …` on stderr (REVIEW m2). Untether turns that result into a time-limit error when it has seen the stderr line by then, and keeps its own timer 30 s later as a backstop. Not live-tested; checked against `agy --help` on 1.5.14, 2026-11-23 |
-| "Trust current config" for Ask me ([#1032](https://github.com/littlebearapps/untether/issues/1032)) | — (**custom**: a fingerprint of the foreign set and a per-chat record, `antigravity/gate_trust.py`, `antigravity_trust.json`) | Checked agy 1.5.17/1.5.18, 2026-11-26 (`--help`, `agy changelog`, bundled `agy-customizations` docs, probe 1032-0). No native way to pin loaded config: no flag, setting or subcommand lists a digest of loaded customisations or refuses to start when they change, and `--settings` can't remove hooks from other files. agy's own "workspace trust" is a TUI prompt deciding whether a folder's config loads at all, not whether Untether may bypass beside it; headless `-p` loads workspace hooks regardless, and Untether never writes agy's trust store. P-T1: `-p /hooks` never lists hooks in a custom agent's front matter (a scalar or mapping `hooks` drops the agent silently; a string list loads but isn't listed), so agents with hooks are untrustable. P-T2: the digests are stable across consecutive listings. Fail-closed choices beyond the plan (2026-11-26): a revoke is kept in memory even when the file can't be saved; a failed or timed-out post-run re-check revokes too; any `hooks` key in any `.md` in the agy set rules trust out (`hooks: []` included). Retire if agy ships a native pin or lists agent hooks |
+| "Trust current config" for Ask me ([#1032](https://github.com/littlebearapps/untether/issues/1032)) | — (**custom**: a fingerprint of the foreign set and a per-chat record, `antigravity/gate_trust.py`, `antigravity_trust.json`) | Checked agy 1.5.17/1.5.18, 2026-11-26 (`--help`, `agy changelog`, bundled `agy-customizations` docs, probe 1032-0). No native way to pin loaded config: no flag, setting or subcommand lists a digest of loaded customisations or refuses to start when they change, and `--settings` can't remove hooks from other files. agy's own "workspace trust" is a TUI prompt deciding whether a folder's config loads at all, not whether Untether may bypass beside it; headless `-p` loads workspace hooks regardless, and Untether never writes agy's trust store. P-T1: `-p /hooks` never lists hooks in a custom agent's front matter (a scalar or mapping `hooks` drops the agent silently; a string list loads but isn't listed), so agents with hooks are untrustable. P-T2: the digests are stable across consecutive listings. Fail-closed choices beyond the plan (2026-11-26): a revoke is kept in memory even when the file can't be saved; a failed or timed-out post-run re-check revokes too; any `hooks` key in any `.md` in the agy set rules trust out (`hooks: []` included). Codex adversarial review (2026-11-26): finding 1 (an in-run edit to what a trusted hook runs, e.g. `package.json` behind `npm run check`) is mitigated in-run by protecting the hook inputs and runner manifests (Nathan's decision); finding 2 (config swapped between the checks and agy loading it) is an accepted residual. Retire if agy ships a native pin or lists agent hooks |
 | agy 1.5.17 / 1.5.18 (self-updated 2026-11-24 … 26) | — (no change needed) | `agy changelog` and `--help` re-read for #1032: 1.5.17 (MCP OAuth refresh, sensitive-file protections for enterprise gateways) and 1.5.18 (image validation, Windows plugin drives, `file:///` permission paths) change nothing the runner or the gate relies on |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or

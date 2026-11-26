@@ -1429,3 +1429,92 @@ def test_always_allow_refused_for_unusual_characters(command: str) -> None:
         {"CommandLine": "ls", "Cwd": f"/p{command}"}
     )
     assert gate_policy.always_allowable({"CommandLine": "npm test\n\tx"})
+
+
+# ── #1032: a trusted run protects what the trusted hooks run ──────────────
+
+
+def _trusted_edit(target: Path, root: Path, protected: tuple[str, ...] | None):
+    return classify(
+        "write_to_file",
+        _edit(target),
+        root=root,
+        conversation_id=CID,
+        trust_protected=protected,
+    )
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        "package.json",
+        "package-lock.json",
+        "web/package.json",  # any depth
+        "Makefile",
+        "GNUmakefile",
+        "build/rules.mk",
+        "pyproject.toml",
+        "setup.py",
+        "requirements-dev.txt",
+        "Cargo.toml",
+        "go.mod",
+        "justfile",
+        "conftest.py",
+        "node_modules/.bin/eslint",
+        ".venv/bin/python",
+    ],
+)
+def test_trusted_run_protects_manifests_and_runner_folders(
+    root: Path, rel: str
+) -> None:
+    """A write to package.json in a trusted run asks; the same write in an
+    untrusted (no foreign config) Ask me run is on the safe list as before."""
+    target = root / rel
+    verdict = _trusted_edit(target, root, ())
+    assert not verdict.allow and verdict.why == "protected"
+    assert _trusted_edit(target, root, None).allow
+
+
+def test_trusted_run_protects_hook_scripts_and_dirs(root: Path) -> None:
+    script = root / "scripts" / "check.sh"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n")
+    pkg = root / "tools" / "lint"
+    pkg.mkdir(parents=True)
+    protected = (str(script), str(pkg))
+    for target in (script, pkg / "__main__.py", pkg / "new.py"):
+        verdict = _trusted_edit(target, root, protected)
+        assert not verdict.allow and verdict.why == "protected", target
+    # An unrelated file still runs without a card in the trusted run.
+    assert _trusted_edit(root / "src" / "app.py", root, protected).allow
+    # Untrusted runs: unchanged.
+    assert _trusted_edit(script, root, None).allow
+
+
+def test_trusted_inputs_path_tricks_dont_escape(root: Path) -> None:
+    script = root / "scripts" / "check.sh"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n")
+    protected = (str(script),)
+    # Case: folded like every other protected name.
+    upper = classify(
+        "write_to_file",
+        _edit(root / "scripts" / "CHECK.sh"),
+        root=root,
+        conversation_id=CID,
+        trust_protected=protected,
+    )
+    assert not upper.allow
+    assert not _trusted_edit(root / "PACKAGE.JSON", root, ()).allow
+    # ``..``: not a plain absolute path.
+    dotted = Path(str(root / "src" / ".." / "scripts" / "check.sh"))
+    assert not _trusted_edit(dotted, root, protected).allow
+    # A symlink to the script.
+    (root / "alias.sh").symlink_to(script)
+    assert not _trusted_edit(root / "alias.sh", root, protected).allow
+    # A hard link to the script.
+    os.link(script, root / "hard.sh")
+    assert not _trusted_edit(root / "hard.sh", root, protected).allow
+    # A symlinked folder on the way.
+    (root / "linked").symlink_to(script.parent, target_is_directory=True)
+    assert not _trusted_edit(root / "linked" / "check.sh", root, protected).allow

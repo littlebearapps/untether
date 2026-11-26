@@ -1187,3 +1187,80 @@ async def test_trust_buttons_end_to_end_through_the_trust_file(
     assert _contract(events).ok
     assert _events(logs, "antigravity.config_trust_used")
     assert agy.BYPASS_FLAG in json.loads(gate_env["record"].read_text())["argv"]
+
+
+def _pkg_decisions(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [
+        (log["decision"], log["source"])
+        for log in _events(logs, "antigravity.gate.decision")
+        if log.get("tool") == "write_to_file"
+    ]
+
+
+@pytest.mark.anyio
+async def test_trusted_run_edit_to_package_json_asks(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1032, Codex review finding 1 (AG-61h): a trusted `npm run check`
+    hook would run whatever package.json says, so in a trusted run an edit
+    to package.json (or the hook's own script) gets a card, never the safe
+    list."""
+    script = project / "scripts" / "check.sh"
+    script.parent.mkdir()
+    script.write_text("#!/bin/sh\n")
+
+    async def listing(runner: Any, cwd: Path) -> dict[str, Any]:
+        extra = {
+            "name": "lint",
+            "enabled": True,
+            "source": str(foreign_stop),
+            "actions": [
+                {"event": "Stop", "type": "command", "command": "npm run check"},
+                {"event": "Stop", "type": "command", "command": "sh scripts/check.sh"},
+            ],
+        }
+        return hooks_listing(extra_groups=[extra])
+
+    monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+    (project / "package.json").write_text('{"scripts": {"check": "eslint ."}}')
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    runner = _runner()
+    await _ask_run(runner)
+    _trust_latest_offer(runner)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_pkg")
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    assert _events(logs, "antigravity.config_trust_used")
+    cards = [
+        e
+        for e in events
+        if isinstance(e, ActionEvent)
+        and e.phase == "started"
+        and e.action.detail.get("request_type") == "PreToolUse"
+    ]
+    assert len(cards) == 1
+    assert "a protected file in this project" in cards[0].action.title
+    assert _pkg_decisions(logs) == [("allow", "user")]
+    (listening,) = _events(logs, "antigravity.gate.listening")
+    assert listening["required"] is True
+
+
+@pytest.mark.anyio
+async def test_untrusted_run_edit_to_package_json_is_safe_listed(
+    project: Path, gate_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No foreign config, no trust: package.json is an ordinary in-project
+    edit on the safe list, exactly as before #1032."""
+    (project / "package.json").write_text('{"scripts": {"check": "eslint ."}}')
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_pkg")
+    events, logs = await _ask_run(_runner())
+    assert _contract(events).ok
+    assert not [
+        e
+        for e in events
+        if isinstance(e, ActionEvent) and e.action.detail.get("request_type")
+    ]
+    assert _pkg_decisions(logs) == [("allow", "policy")]
