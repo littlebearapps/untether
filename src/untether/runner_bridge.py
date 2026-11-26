@@ -1994,6 +1994,10 @@ def _record_export_event(
         if isinstance(evt, StartedEvent):
             event_dict["engine"] = evt.engine
             event_dict["title"] = evt.title
+            # #1410: Codex/Pi/OpenCode carry the model in meta, not the title.
+            model = (evt.meta or {}).get("model")
+            if isinstance(model, str) and model:
+                event_dict["model"] = model
         elif isinstance(evt, ActionEvent):
             event_dict["phase"] = evt.phase
             event_dict["ok"] = evt.ok

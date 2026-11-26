@@ -62,7 +62,7 @@ You get a `.json` file with the same information in a machine-readable format, s
 
 Untether keeps the **20 most recently active sessions** in memory, across all chats; the least recently active is dropped first. History is lost on restart. The `/export` command exports the chat's most recently *active* session, so a resumed older session counts as the latest ([#417](https://github.com/littlebearapps/untether/issues/417)). It's the most recent session **in the chat**: in a forum group that means the most recent session in any topic of the group, not just the current topic (topic-scoped export is tracked in [#849](https://github.com/littlebearapps/untether/issues/849)).
 
-An export holds only what Untether itself saw: turns you ran in a terminal (after copying a resume line, say) aren't in it, even when the chat later resumed that session. An Antigravity export names the model agy ran (`Model: gemini-3.8-flash`), or `agy default` when the chat set none ([#1058](https://github.com/littlebearapps/untether/issues/1058)).
+An export holds only what Untether itself saw: turns you ran in a terminal (after copying a resume line, say) aren't in it, even when the chat later resumed that session. The `Model:` line names the model the engine reported, such as `Model: gemini-3.8-flash`. When the engine reported none, as in an Antigravity chat that set no model, the line is left out ([#1058](https://github.com/littlebearapps/untether/issues/1058), [#1410](https://github.com/littlebearapps/untether/issues/1410)).
 
 Each session records:
 
