@@ -1335,6 +1335,10 @@ class JsonlSubprocessRunner(BaseRunner):
             state, "background_observed", False
         ):
             stream.background_observed = True
+        # #1412: Codex app-server has no ``result`` frame; its runner latches
+        # the main thread's turn/completed on its own state instead.
+        if not stream.saw_result and getattr(state, "saw_result", False):
+            stream.saw_result = True
         # Peek at raw JSON for event timeline (engine-agnostic)
         try:
             raw_dict = json.loads(line)

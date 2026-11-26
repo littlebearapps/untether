@@ -371,10 +371,12 @@
   {
    "logs": [
     "debug callback.executed command=\"claude_control\" +[chat_id,logger_name]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
     "info callback.answered command=\"claude_control\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
     "info callback.dispatch command=\"claude_control\" +[chat_id,logger_name]",
     "info claude_control.sent approved=true request_id=\"req-bash-1\" tool_name=\"Bash\" +[logger_name]",
-    "info control_response.sent approved=true channel=\"pipe\" permission_mode=\"plan\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" +[logger_name]"
+    "info control_response.sent approved=true channel=\"pipe\" permission_mode=\"plan\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" +[logger_name]",
+    "info progress_edits.keyboard_retired request_id=\"req-bash-1\" +[action_id,logger_name]"
    ],
    "registry": {
     "handled": [
@@ -425,6 +427,26 @@
    ],
    "step": "do:tap data=claude_control:approve:req-bash-1",
    "telegram": [
+    {
+     "entities": [
+      "code@34+9",
+      "code@100+9",
+      "code@113+9",
+      "code@154+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t> · step 2\n\n▸ sleep 300\n▸ Permission Request [CanUseTool] - tool: Bash (command=sleep 300) $ sleep 300\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "id": 2,
+     "op": "delete"
+    },
     {
      "chat": 123,
      "id": 3,
@@ -512,10 +534,6 @@
      ],
      "op": "edit",
      "text": "working · claude · <t> · step 2\n\n✓ sleep 300\n✓ Permission resolved\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
-    },
-    {
-     "id": 2,
-     "op": "delete"
     }
    ]
   },

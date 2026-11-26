@@ -54,6 +54,9 @@ USAGE_TTL_S = 60.0
 USAGE_FAILURE_TTL_S = 30.0
 CATALOGUE_TTL_S = 3600.0
 CATALOGUE_FAILURE_TTL_S = 300.0
+# #1412: the /config Reasoning page re-reads a catalogue older than this
+# (about 1 s, no tokens); runs keep the 1 h cache through peek_levels.
+REASONING_PAGE_MAX_AGE_S = 60.0
 # The run footer accepts a usage snapshot this old; it never fetches.
 FOOTER_MAX_AGE_S = 900.0
 WARMUP_INTERVAL_S = 3600.0
@@ -503,12 +506,15 @@ class _ReadCache[V]:
         self.last_error_kind: str | None = None
         self.last_version: str | None = None
 
-    def _fresh(self, key: tuple[Any, ...]) -> tuple[V, float] | None:
+    def _fresh(
+        self, key: tuple[Any, ...], max_age_s: float | None = None
+    ) -> tuple[V, float] | None:
         hit = self.values.get(key)
         if hit is None:
             return None
         age = time.monotonic() - hit[0]
-        return (hit[1], age) if age < self.ttl_s else None
+        limit = self.ttl_s if max_age_s is None else min(self.ttl_s, max_age_s)
+        return (hit[1], age) if age < limit else None
 
     def peek(
         self, match: Callable[[tuple[Any, ...]], bool], max_age_s: float
@@ -524,14 +530,18 @@ class _ReadCache[V]:
         return (best[1], age) if age < max_age_s else None
 
     async def get(
-        self, key: tuple[Any, ...], fetch: Callable[[], Awaitable[V]]
+        self,
+        key: tuple[Any, ...],
+        fetch: Callable[[], Awaitable[V]],
+        *,
+        max_age_s: float | None = None,
     ) -> tuple[V, float]:
-        hit = self._fresh(key)
+        hit = self._fresh(key, max_age_s)
         if hit is not None:
             return hit
         lock = self._locks.setdefault(key, anyio.Lock())
         async with lock:
-            hit = self._fresh(key)
+            hit = self._fresh(key, max_age_s)
             if hit is not None:
                 return hit
             failed = self._failures.get(key)
@@ -652,10 +662,11 @@ def merge_push(cmd: str, params: Any) -> None:
         raw = hit[0]
     limit_id = _str(snapshot.get("limitId")) or next(iter(raw.snapshots), "codex")
     current = raw.snapshots.setdefault(limit_id, {})
-    for field_name, value in snapshot.items():
-        if value is not None:
-            current[field_name] = value
+    fields = [name for name, value in snapshot.items() if value is not None]
+    for field_name in fields:
+        current[field_name] = snapshot[field_name]
     _PUSHED_AT[cmd] = time.monotonic()
+    logger.info("codex.reads.quota_push_merged", limit_id=limit_id, fields=fields)
 
 
 def usage_stats() -> ReadStats:
@@ -663,9 +674,11 @@ def usage_stats() -> ReadStats:
     return _USAGE.stats(hit[0].auth_kind if hit else None)
 
 
-async def get_catalogue(runner: CodexRunner, cwd: str | None) -> CodexCatalogue:
+async def get_catalogue(
+    runner: CodexRunner, cwd: str | None, *, max_age_s: float | None = None
+) -> CodexCatalogue:
     """Models, levels, the user's config for *cwd* and web-search capability,
-    from the 1 h cache or one read."""
+    from the 1 h cache (or one no older than *max_age_s*) or one read."""
     cmd = runner.command()
     version = await _version(cmd)
     _CATALOGUE.last_version = version
@@ -696,7 +709,9 @@ async def get_catalogue(runner: CodexRunner, cwd: str | None) -> CodexCatalogue:
         return catalogue
 
     try:
-        catalogue, _ = await _CATALOGUE.get((cmd, version, cwd), fetch)
+        catalogue, _ = await _CATALOGUE.get(
+            (cmd, version, cwd), fetch, max_age_s=max_age_s
+        )
     except CodexReadError as exc:
         logger.warning("codex.reads.catalogue_failed", kind=exc.kind, code=exc.code)
         raise

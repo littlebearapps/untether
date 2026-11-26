@@ -237,17 +237,19 @@ prompt = "Check the inbox and draft replies."
 |---|---|---|
 | `max_turns` | Claude | Claude Code's own `--max-turns` stops the turn (result `error_max_turns`, error card). It counts per query, so Untether also adds up the turns of the run's live session and closes it after the turn that reaches the limit, ending any background wake turns. |
 | `max_budget_usd` | Claude | Claude Code's own `--max-budget-usd` (result `error_max_budget_usd`). The CLI checks after each model call, so a run can go a little over. Untether closes the live session after the turn whose run total reaches the limit, like `max_turns`. |
-| `max_elapsed_s` | all | Untether's timer, from the run's start. Claude: the turn is stopped with the CLI's native `interrupt` request, then the run ends as on `/cancel`. Antigravity: agy's own `--print-timeout`, with Untether's timer 30 s later as a backstop. Codex, OpenCode, Pi: the run is cancelled like `/cancel`. |
+| `max_elapsed_s` | all | Untether's timer, from the run's start (when the message was dispatched; an automatic retry such as auto-continue doesn't restart it). Claude: the turn is stopped with the CLI's native `interrupt` request, then the run ends as on `/cancel`. Antigravity: agy's own `--print-timeout`, with Untether's timer 30 s later as a backstop. Codex, OpenCode, Pi: the run is cancelled like `/cancel`. |
 
 - `max_turns` and `max_budget_usd` need `engine = "claude"`; on any other
   engine, or with no `engine`, the entry is skipped with a notice. `max_elapsed_s`
   must be at least 30.
 - The time limit covers the whole run, including a live session's idle hold
-  and background wake turns after the answer. The card reads
-  `stopped: time limit` (with a push notification); if the stopped turn's own
-  result reached the chat first, its footer says
-  `⏱️ Stopped at this trigger's time limit`. Log: WARNING
-  `trigger.max_elapsed.reached`. Time spent waiting on a rate limit counts.
+  and background wake turns after the answer. A new message reading
+  `stopped: time limit` replaces the card (with a push notification and no
+  buttons); if the stopped turn's own result reached the chat first, its
+  footer says `⏱️ Stopped at this trigger's time limit`. Log:
+  `trigger.max_elapsed.reached`, a WARNING when the limit stops work, INFO
+  (`idle=true`) when it only closes an answered live session with nothing in
+  flight. Time spent waiting on a rate limit counts.
 - A Claude `max_elapsed_s` above `[watchdog] live_session_max_s` is lowered to
   it (WARNING `trigger.max_elapsed.clamped`): the session can't outlive that
   cap anyway.
@@ -257,7 +259,9 @@ prompt = "Check the inbox and draft replies."
 - `max_budget_usd` is separate from `[cost_budget]`: both apply, and the
   first limit reached stops the run.
 - The journal records `max_turns`, `max_budget` or `max_elapsed` as the
-  run's `outcome`. A reply to the run uses the chat's own settings, without
+  run's `outcome`. When the answer is out but a live session still holds
+  background work, the line waits: if the time limit then stops that work it
+  records `max_elapsed`, otherwise the answer's own outcome. A reply to the run uses the chat's own settings, without
   these limits.
 
 ### Quiet end
@@ -1091,8 +1095,8 @@ tail -n 20 ~/.untether/triggers_runs.jsonl | jq -c '{trigger_id, outcome, cost_u
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
 
-- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, `model=` / `effort=` / `mode=` when set, last-fired relative time
-- **Webhooks**: id, path, auth scheme, project, engine, `model=` / `effort=` / `mode=` when set ([#1122](https://github.com/littlebearapps/untether/issues/1122)), last-fired
+- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, `model=` / `effort=` / `mode=` when set, `turns=` / `budget=$` / `limit=Ns` / `quiet` when set ([#1412](https://github.com/littlebearapps/untether/issues/1412)), last-fired relative time
+- **Webhooks**: id, path, auth scheme, project, engine, `model=` / `effort=` / `mode=` when set ([#1122](https://github.com/littlebearapps/untether/issues/1122)), `turns=` / `budget=$` / `limit=Ns` / `quiet` when set ([#1412](https://github.com/littlebearapps/untether/issues/1412)), last-fired
 
 The engine column shows the trigger's own `engine` setting, not the engine it
 resolves to. The page also shows the status (active or paused) and total cron

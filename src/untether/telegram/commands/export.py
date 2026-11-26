@@ -190,6 +190,16 @@ def _format_export_markdown(
     lines.append("---\n")
 
     started_rendered = False
+    # #1410: the last reported model wins (Pi's follow-up started, a Codex
+    # reroute); the title is often just the engine name.
+    model = next(
+        (
+            e["model"]
+            for e in reversed(events)
+            if e.get("type") == "started" and e.get("model")
+        ),
+        None,
+    )
     # #928: where each live turn's heading starts (a dropped turn rewinds).
     turn_heading_at: dict[object, int] = {}
     for evt in events:
@@ -199,10 +209,9 @@ def _format_export_markdown(
                 continue
             started_rendered = True
             engine = evt.get("engine", "unknown")
-            title = evt.get("title", "")
             lines.append(f"## Session Started ({engine})")
-            if title:
-                lines.append(f"Model: {title}\n")
+            if model:
+                lines.append(f"Model: {model}\n")
         elif evt_type == "action":
             phase = evt.get("phase", "")
             action = evt.get("action", {})

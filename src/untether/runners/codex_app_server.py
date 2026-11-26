@@ -645,6 +645,9 @@ class AppServerRunState(CodexRunState):
     unattended_denied: list[str] = field(default_factory=list)
     # A card's Stop (``cancel``) interrupted the turn on purpose.
     card_stop: bool = False
+    # #1412: the main thread's turn/completed arrived (any status); mirrored
+    # onto ``JsonlStreamState.saw_result`` for session.summary.
+    saw_result: bool = False
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -1550,8 +1553,14 @@ class CodexAppServerRunner(CodexRunner):
             "approvalsReviewer": result.approvals_reviewer,
             "sandbox": sandbox_policy_mode(result.sandbox),
         }
+        # #1412: name the config.web_search sent too; Codex doesn't echo it,
+        # so it stays out of the mismatch check below.
+        logged = dict(requested)
+        run_options = get_run_options()
+        if run_options is not None and run_options.web_search is not None:
+            logged["web_search"] = "live" if run_options.web_search else "disabled"
         logger.info(
-            "codex.app_server.permissions", requested=requested, effective=effective
+            "codex.app_server.permissions", requested=logged, effective=effective
         )
         mismatched = sorted(k for k, v in requested.items() if effective[k] != v)
         if not mismatched:
@@ -1741,6 +1750,7 @@ class CodexAppServerRunner(CodexRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        state.saw_result = True  # sub-agent turns are filtered out upstream
         cards = self._retire_cards(state)  # #963: none may keep its buttons
         if turn.status == "completed":
             return [

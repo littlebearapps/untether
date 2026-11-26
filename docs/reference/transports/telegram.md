@@ -587,7 +587,12 @@ Keys (include `chat_id` to avoid cross-chat collisions):
 Scheduling:
 
 - Ordered by `(priority, queued_at)`.
-- Priorities: send=0, delete=1, edit=2.
+- Priorities: keyboard edit=-1, send=0, delete=1, edit=2. A progress edit that
+  changes the approval buttons is sent as `message_kind("keyboard")`, so the
+  swap after a tap goes before the tap's feedback send and the push delete
+  ([#1411](https://github.com/littlebearapps/untether/issues/1411)).
+- When a newer edit replaces a pending one of the same message, it keeps the
+  older edit's queue time and the higher (smaller) of the two priorities.
 - Within a priority tier, the oldest pending op runs first.
 
 ## Callback answering

@@ -588,3 +588,45 @@ async def test_418_no_session_replies_have_no_attachment() -> None:
     assert result is not None
     assert result.text == "Session has no recorded events."
     assert result.attachment is None
+
+
+def _export_via_recorder(engine: str, started: list[tuple[str, dict | None]]) -> str:
+    """#1410: record started events through the real bridge recorder."""
+    from untether.events import EventFactory
+    from untether.model import ResumeToken
+    from untether.runner_bridge import _record_export_event
+
+    _reset()
+    factory = EventFactory(engine=engine)
+    token = ResumeToken(engine=engine, value="sess-1410")
+    for title, meta in started:
+        _record_export_event(factory.started(token, title=title, meta=meta), None)
+    _, events, usage = _SESSION_HISTORY[(0, "sess-1410")]
+    return _format_export_markdown("sess-1410", events, usage)
+
+
+def test_export_model_from_meta_not_title() -> None:
+    md = _export_via_recorder("codex", [("Codex", {"model": "gpt-6.1-sol"})])
+    assert "Model: gpt-6.1-sol\n" in md
+    assert "Model: Codex" not in md
+
+
+def test_export_model_from_pi_followup_started() -> None:
+    md = _export_via_recorder("pi", [("pi", None), ("pi", {"model": "kimi-k3"})])
+    assert "Model: kimi-k3\n" in md
+    assert "Model: pi" not in md
+
+
+def test_export_model_rerouted_last_wins() -> None:
+    md = _export_via_recorder(
+        "codex",
+        [("Codex", {"model": "gpt-6.1-sol"}), ("Codex", {"model": "gpt-6-astra"})],
+    )
+    assert "Model: gpt-6-astra\n" in md
+    assert "gpt-6.1-sol" not in md
+
+
+def test_export_no_model_line_when_unknown() -> None:
+    md = _export_via_recorder("opencode", [("opencode", {"cwd": "/tmp"})])
+    assert "## Session Started (opencode)" in md
+    assert "Model:" not in md

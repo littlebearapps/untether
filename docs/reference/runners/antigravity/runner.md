@@ -870,8 +870,8 @@ through; every other run keeps `--disable-slash-commands`.
 
 `/export` works in an Antigravity chat as it does for every engine: it renders what Untether itself saw of the
 session (the commands, file changes and answers), kept in memory for the 20 most recently active sessions. Its
-`Model:` line is the model the chat set (`--model`, which agy echoes as `init.model`), or `agy default` when none
-was set: agy names no model in its stream then ([#1058](https://github.com/littlebearapps/untether/issues/1058)).
+`Model:` line is the model the chat set (`--model`, which agy echoes as `init.model`). With none set, agy names no
+model in its stream, so the export has no `Model:` line ([#1058](https://github.com/littlebearapps/untether/issues/1058), [#1410](https://github.com/littlebearapps/untether/issues/1410)).
 Its `**Usage:**` line labels each figure's scope: the duration is the last run's, the tokens are agy's running
 conversation total, e.g. `38.4s (last run) · 24263 in / 303 out tokens (thread total)` ([#1158](https://github.com/littlebearapps/untether/issues/1158)).
 

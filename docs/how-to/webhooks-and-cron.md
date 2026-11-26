@@ -496,8 +496,8 @@ prompt = "Check the inbox and draft replies."
 
 `max_turns` and `max_budget_usd` use Claude Code's own limits and need
 `engine = "claude"`. `max_elapsed_s` (at least 30 seconds) works with every
-engine: when it runs out, Untether stops the run and the card reads
-`stopped: time limit`. A run stopped by a limit is never silent, and the run
+engine: when it runs out, Untether stops the run and posts
+`stopped: time limit` in place of the card, with a push notification. A run stopped by a limit is never silent, and the run
 journal records `max_turns`, `max_budget` or `max_elapsed`. Details:
 [Run budgets](../reference/triggers/triggers.md#run-budgets).
 

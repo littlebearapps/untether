@@ -47,6 +47,7 @@ from ..approval_originator import message_sender
 from ..bridge import send_plain
 from ..engine_overrides import (
     allowed_reasoning_levels,
+    codex_reasoning_levels,
     drop_unsupported_reasoning,
     supports_reasoning,
 )
@@ -142,7 +143,13 @@ def _resolve_reasoning_override(
             engine=engine,
             # Not ``level=``: structlog's add_log_level overwrites that key.
             reasoning_level=level,
-            allowed=list(allowed_reasoning_levels(engine)),
+            # #1412: the list the level was checked against (Codex: the
+            # model's own levels), not the engine-wide vocabulary.
+            allowed=list(
+                codex_reasoning_levels(run_options.model)
+                if engine == "codex"
+                else allowed_reasoning_levels(engine)
+            ),
         )
         if level in allowed_reasoning_levels(engine):
             # #846: a real level this model doesn't list (Codex catalogue).

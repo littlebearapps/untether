@@ -425,6 +425,18 @@ def test_telegram_presenter_clears_button_on_cancelled() -> None:
     assert rendered.extra["reply_markup"]["inline_keyboard"] == []
 
 
+def test_time_limit_label_clears_keyboard() -> None:
+    """#1412 item 7: a trigger's time-limit stop is a finished run too."""
+    from untether.runner_bridge import _TIME_LIMIT_LABEL
+
+    presenter = TelegramPresenter()
+    state = ProgressTracker(engine="codex").snapshot()
+
+    rendered = presenter.render_progress(state, elapsed_s=0.0, label=_TIME_LIMIT_LABEL)
+
+    assert rendered.extra["reply_markup"]["inline_keyboard"] == []
+
+
 def test_telegram_presenter_final_clears_button() -> None:
     presenter = TelegramPresenter()
     state = ProgressTracker(engine="codex").snapshot()
@@ -3284,6 +3296,26 @@ def test_resolve_reasoning_override_level_this_model_lacks() -> None:
     assert opts is not None and opts.reasoning is None
     assert note is not None
     assert "`ultra` isn't available for this model" in note.action.title
+
+
+def test_unsupported_level_log_lists_model_levels() -> None:
+    """#1412 item 5: for Codex the log lists the model's own levels (the
+    list the level was checked against), so the ignored level isn't in it."""
+    from tests.test_codex_reads import seed_catalogue
+    from untether.runners.run_options import EngineRunOptions
+    from untether.telegram.commands.executor import _resolve_reasoning_override
+
+    seed_catalogue()
+    with capture_logs() as logs:
+        _resolve_reasoning_override(
+            engine="codex",
+            run_options=EngineRunOptions(model="gpt-6-luna", reasoning="ultra"),
+        )
+    events = [
+        e for e in logs if e["event"] == "run.reasoning.unsupported_level_ignored"
+    ]
+    assert len(events) == 1
+    assert events[0]["allowed"] == ["low", "medium", "high", "xhigh", "max"]
 
 
 def test_resolve_reasoning_override_allowed_level_untouched() -> None:

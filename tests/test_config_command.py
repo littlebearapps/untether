@@ -2242,9 +2242,11 @@ def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
     from untether.runners.codex import CodexRunner
 
     calls: list[str | None] = []
+    max_ages: list[float | None] = []
 
-    async def get_catalogue(runner, cwd):
+    async def get_catalogue(runner, cwd, *, max_age_s=None):
         calls.append(cwd)
+        max_ages.append(max_age_s)
         if fail:
             raise codex_reads.CodexReadError("timeout")
         return fixture_catalogue()
@@ -2261,6 +2263,7 @@ def _codex_page_ctx(tmp_path, monkeypatch, *, fail: bool = False) -> MagicMock:
     )
     ctx.runtime.resolve_run_cwd.return_value = None
     ctx.catalogue_calls = calls
+    ctx.catalogue_max_ages = max_ages
     return ctx
 
 
@@ -2275,6 +2278,8 @@ class TestCodexReasoningCatalogue:
         await ConfigCommand().handle(ctx)
         msg = _last_edit_msg(ctx)
         assert ctx.catalogue_calls  # read on page open
+        # #1412 item 3: the page re-reads a catalogue older than 60 s.
+        assert ctx.catalogue_max_ages == [60.0]
         assert "Model: <b>gpt-6.1-sol</b> (from your Codex config)" in msg.text
         assert "Current: <b>default (low)</b>" in msg.text
         assert "• <b>low</b> — Fast responses with lighter reasoning" in msg.text
@@ -2343,7 +2348,7 @@ class TestCodexReasoningCatalogue:
         )
         ctx = _codex_page_ctx(tmp_path, monkeypatch)
 
-        async def get_catalogue(runner, cwd):
+        async def get_catalogue(runner, cwd, **_kw):
             return catalogue
 
         monkeypatch.setattr(codex_reads, "get_catalogue", get_catalogue)
@@ -4187,6 +4192,22 @@ class TestCostUsage:
         assert "config:cu:su_off" in buttons
 
     @pytest.mark.anyio
+    async def test_cost_page_codex_mentions_no_5h_weekly(self, tmp_path):
+        """#1412 item 4: the subscription line is engine-neutral (Codex's
+        buckets aren't 5h/weekly)."""
+        ctx = _make_ctx(
+            args_text="cu",
+            text="config:cu",
+            config_path=tmp_path / "prefs.json",
+            default_engine="codex",
+        )
+        await ConfigCommand().handle(ctx)
+        msg = _last_edit_msg(ctx)
+        assert "Subscription usage" in msg.text
+        assert "5h" not in msg.text and "weekly" not in msg.text
+        assert "Show how much of your plan's usage limit is used." in msg.text
+
+    @pytest.mark.anyio
     async def test_cost_usage_page_renders_for_opencode(self, tmp_path):
         """OpenCode sees API cost but not subscription usage."""
         state_path = tmp_path / "prefs.json"
@@ -5452,6 +5473,43 @@ class TestTriggersPagePerChat:
         text = _last_edit_msg(ctx).text
         (row,) = [line for line in text.splitlines() if line.startswith("<code>qa")]
         assert "model=<i>sonnet</i> · effort=<i>low</i> · mode=<i>auto</i>" in row
+        assert "turns=" not in row and "limit=" not in row and "quiet" not in row
+
+    @pytest.mark.anyio
+    async def test_trigger_row_shows_run_budgets(self, tmp_path):
+        """#1412 item 13: #1125's budgets and #1220's quiet end show on the
+        row, only when set."""
+        from untether.triggers.manager import TriggerManager
+        from untether.triggers.settings import parse_trigger_config
+
+        cfg = parse_trigger_config(
+            {
+                "enabled": True,
+                "crons": [
+                    {
+                        "id": "nightly",
+                        "schedule": "0 3 * * *",
+                        "prompt": "x",
+                        "chat_id": 123,
+                        "engine": "claude",
+                        "max_turns": 5,
+                        "max_budget_usd": 0.5,
+                        "max_elapsed_s": 600,
+                        "quiet_unless_output": True,
+                    },
+                ],
+            }
+        )
+        cmd = ConfigCommand()
+        ctx = _make_ctx(args_text="tg", text="config:tg", chat_id=123)
+        ctx.trigger_manager = TriggerManager(cfg)
+        await cmd.handle(ctx)
+        text = _last_edit_msg(ctx).text
+        (row,) = [line for line in text.splitlines() if "nightly" in line]
+        assert (
+            "turns=<i>5</i> · budget=<i>$0.50</i> · limit=<i>600s</i> · <i>quiet</i>"
+            in row
+        )
 
     @pytest.mark.anyio
     async def test_filters_to_current_chat(self, tmp_path):

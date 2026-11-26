@@ -165,6 +165,26 @@ async def test_one_spawn_answers_every_catalogue_read(
 
 
 @pytest.mark.anyio
+async def test_reasoning_page_rereads_catalogue_older_than_60s(
+    tmp_path: Path, supported: list[str]
+) -> None:
+    """#1412 item 3: a caller's max_age_s re-reads a catalogue older than
+    that; callers without it keep the 1 h cache."""
+    fake = Fake(tmp_path)
+    runner = fake.runner()
+    await reads.get_catalogue(runner, "/proj")
+    await reads.get_catalogue(runner, "/proj", max_age_s=60.0)
+    assert fake.spawn_count() == 1  # fresh: served from the cache
+    key = next(iter(reads._CATALOGUE.values))
+    at, value = reads._CATALOGUE.values[key]
+    reads._CATALOGUE.values[key] = (at - 61.0, value)
+    await reads.get_catalogue(runner, "/proj")
+    assert fake.spawn_count() == 1  # still inside the 1 h TTL
+    await reads.get_catalogue(runner, "/proj", max_age_s=60.0)
+    assert fake.spawn_count() == 2
+
+
+@pytest.mark.anyio
 async def test_usage_parse_from_the_pro_transcript(
     tmp_path: Path, supported: list[str]
 ) -> None:
@@ -396,6 +416,29 @@ async def test_push_merge_null_never_clears(
     assert usage.buckets[0].windows[0].pct == 11
     assert usage.credits_balance == "62500.0000000000"  # null didn't clear
     assert usage.plan == "pro"
+
+
+def test_merge_push_logs_info() -> None:
+    """#1412 item 6: one INFO line per merged push, naming the bucket and the
+    non-null fields (no values)."""
+    from structlog.testing import capture_logs
+
+    with capture_logs() as logs:
+        reads.merge_push(
+            "codex",
+            {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {"usedPercent": 40},
+                    "credits": None,
+                }
+            },
+        )
+    merged = [e for e in logs if e["event"] == "codex.reads.quota_push_merged"]
+    assert len(merged) == 1
+    assert merged[0]["log_level"] == "info"
+    assert merged[0]["limit_id"] == "codex"
+    assert merged[0]["fields"] == ["limitId", "primary"]
 
 
 def test_push_without_a_read_feeds_peek_but_not_get() -> None:

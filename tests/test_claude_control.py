@@ -5138,3 +5138,163 @@ async def test_837_cli_pending_check_unknown(reply: dict[str, Any] | None) -> No
         _REQUEST_TO_SESSION.pop("r-u", None)
         _SESSION_STDIN.pop(sid, None)
         _ACTIVE_RUNNERS.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# #1411: the answered request's keyboard is retired at the tap
+# ---------------------------------------------------------------------------
+
+
+def test_1411_denied_agent_tool_result_reconciles() -> None:
+    """Trace of the live C6 Deny: the denied agent tool's result frame (the
+    CLI writes it ~6 ms after the response) already completes the request's
+    keyboard action. The ~16 s seen live was not a reconcile miss."""
+    state, factory = _make_state_with_session("sess-1411")
+    agent_tool = _decode_event(
+        {
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_agent",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_fetch",
+                        "name": "WebFetch",
+                        "input": {"url": "https://example.com"},
+                    }
+                ]
+            },
+        }
+    )
+    translate_claude_event(agent_tool, title="claude", state=state, factory=factory)
+    request = _decode_event(
+        {
+            "type": "control_request",
+            "request_id": "rq-1411",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "WebFetch",
+                "input": {"url": "https://example.com"},
+                "tool_use_id": "toolu_fetch",
+                "agent_id": "a1411",
+            },
+        }
+    )
+    (started,) = translate_claude_event(
+        request, title="claude", state=state, factory=factory
+    )
+    _HANDLED_REQUESTS["rq-1411"] = None  # the Deny tap
+    denied = _decode_event(
+        {
+            "type": "user",
+            "parent_tool_use_id": "toolu_agent",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_fetch",
+                        "content": "User denied",
+                        "is_error": True,
+                    }
+                ]
+            },
+        }
+    )
+    events = translate_claude_event(
+        denied, title="claude", state=state, factory=factory
+    )
+    completed = [
+        e.action.id
+        for e in events
+        if isinstance(e, ActionEvent) and e.phase == "completed"
+    ]
+    assert completed.count(started.action.id) == 1
+
+
+def _ctx_1411(args_text: str):
+    from untether.commands import CommandContext
+    from untether.transport import MessageRef
+
+    return CommandContext(
+        command="claude_control",
+        text=f"claude_control:{args_text}",
+        args_text=args_text,
+        args=(args_text,),
+        message=MessageRef(channel_id=123, message_id=1),
+        reply_to=None,
+        reply_text=None,
+        config_path=None,
+        plugin_config=None,  # type: ignore[arg-type]
+        runtime=None,  # type: ignore[arg-type]
+        executor=AsyncMock(send=AsyncMock(return_value=None)),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("sent", "retired"),
+    [
+        pytest.param({"status": "pending", "sent": True}, True, id="written"),
+        pytest.param(
+            {"status": "pending", "sent": False, "reason": "write_failed"},
+            False,
+            id="write-failed",
+        ),
+        pytest.param(
+            {"status": "already_handled", "sent": False},
+            False,
+            id="already-handled",
+        ),
+        pytest.param({"status": "cancelled", "sent": True}, False, id="cancelled"),
+    ],
+)
+@pytest.mark.parametrize("action", ["approve", "deny"])
+async def test_1411_approve_retires_after_write(
+    monkeypatch: pytest.MonkeyPatch, action: str, sent: dict, retired: bool
+) -> None:
+    """The keyboard goes once the response is written — never for a tap that
+    wrote nothing, lost to an earlier answer, or a request the CLI withdrew."""
+    from untether.interactive.registry import ControlRequestStatus, ControlSendResult
+    from untether.telegram.commands import claude_control
+
+    order: list[str] = []
+    fields = dict(sent)
+    fields["status"] = ControlRequestStatus(fields["status"])
+
+    async def fake_respond(request_id, approved, **_kw):
+        order.append("write")
+        return ControlSendResult(**fields)
+
+    def fake_retire(request_id: str) -> bool:
+        order.append(f"retire:{request_id}")
+        return True
+
+    monkeypatch.setattr(claude_control, "respond_to_control_request", fake_respond)
+    monkeypatch.setattr(claude_control, "retire_answered_keyboard", fake_retire)
+    await claude_control.ClaudeControlCommand().handle(_ctx_1411(f"{action}:rq-1"))
+    assert order == (["write", "retire:rq-1"] if retired else ["write"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["always", "session", "stop"])
+async def test_1411_ia_extras_retire_after_write(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    from untether.interactive.registry import ControlRequestStatus, ControlSendResult
+    from untether.telegram.commands import claude_control
+
+    retired: list[str] = []
+    result = ControlSendResult(status=ControlRequestStatus.PENDING, sent=True)
+
+    async def fake_respond(*_a, **_kw):
+        return result
+
+    monkeypatch.setattr(claude_control, "respond", fake_respond)
+    monkeypatch.setattr(claude_control, "retire_answered_keyboard", retired.append)
+    await claude_control.IaControlCommand().handle(_ctx_1411(f"{action}:rq-ia"))
+    assert retired == ["rq-ia"]
+
+    retired.clear()
+    result = ControlSendResult(status=ControlRequestStatus.PENDING, sent=False)
+    await claude_control.IaControlCommand().handle(_ctx_1411(f"{action}:rq-ia"))
+    assert retired == []

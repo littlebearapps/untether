@@ -24,7 +24,11 @@ from ...interactive.registry import (
     session_alive,
 )
 from ...logging import get_logger
-from ...runner_bridge import delete_outline_messages, register_ephemeral_message
+from ...runner_bridge import (
+    delete_outline_messages,
+    register_ephemeral_message,
+    retire_answered_keyboard,
+)
 
 # Claude's plan flow (Pause & Outline, post-outline approval) stays Claude's.
 from ...runners.claude import (
@@ -391,6 +395,7 @@ class ClaudeControlCommand:
             )
             if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
                 return _unsent_result(sent, request_id, action, channel_id=channel_id)
+            retire_answered_keyboard(request_id)  # #1411
             session_id = sent.session_id
 
             # Arm the outline gate: ExitPlanMode is auto-denied until Claude
@@ -511,6 +516,8 @@ class ClaudeControlCommand:
             # #685: never log claude_control.sent (or say "Approved") for a
             # tap that wrote nothing.
             return _unsent_result(sent, request_id, action, channel_id=channel_id)
+        # #1411: the buttons go now, not with the CLI's next frame.
+        retire_answered_keyboard(request_id)
         session_id = sent.session_id
 
         # Clear outline-pending state on explicit approve/deny
@@ -636,6 +643,7 @@ class ClaudeControlCommand:
             return _unsent_result(
                 sent, request_id, "chat", channel_id=ctx.message.channel_id
             )
+        retire_answered_keyboard(request_id)  # #1411
         session_id = sent.session_id
 
         if session_id:
@@ -748,6 +756,7 @@ class IaControlCommand(ClaudeControlCommand):
         )
         if not sent.sent or sent.status is ControlRequestStatus.CANCELLED:
             return _unsent_result(sent, request_id, action, channel_id=channel_id)
+        retire_answered_keyboard(request_id)  # #1411
         logger.info(
             "claude_control.sent",
             request_id=request_id,
