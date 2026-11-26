@@ -281,6 +281,9 @@ OTHER_THREAD = "01a1f1dc-09ac-7ec3-851e-ef00717cb6a2"
 _FAKE_APP_SERVER = r"""
 import json, os, sys, time
 SC = json.load(open(SC_PATH))
+if SC.get("ignore_term"):
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 CUR = {}
 log = open(LOG_PATH, "a")
 with open(ARGV_PATH, "w") as fh:
@@ -292,6 +295,45 @@ def out(msg):
 
 def thread(tid):
     return {"id": tid, "source": "vscode", "model": None}
+
+def completed(tid, turn_id, status="completed"):
+    out({"method": "turn/completed", "params": {"threadId": tid, "turn": {
+        "id": turn_id, "status": status, "items": [], "error": None}}})
+
+def followup(rid, tid, n):
+    # #964-3a: a later turn/start on the same process (the followup scenario).
+    FU = SC.get("followup", {})
+    turn_id = CUR["turn"] = "turn-%d" % n
+    turn = {"id": turn_id, "status": "inProgress", "items": []}
+    if FU.get("error"):
+        out({"id": rid, "error": {"code": -32600, "message": FU["error"]}})
+        return
+    if FU.get("start_delay"):
+        time.sleep(FU["start_delay"])
+    early = FU.get("early_started") or FU.get("late_response")
+    if early:
+        out({"method": "turn/started", "params": {"threadId": tid, "turn": turn}})
+    if not (FU.get("lost_response") or FU.get("late_response")):
+        out({"id": rid, "result": {"turn": turn}})
+    if not early:
+        out({"method": "turn/started", "params": {"threadId": tid, "turn": turn}})
+    for item in FU.get("items", []):
+        out({"method": "item/started", "params": {"threadId": tid, "turnId": turn_id,
+             "item": item}})
+    if FU.get("approval"):
+        req = dict(FU["approval"])
+        req["params"] = dict(req["params"], turnId=turn_id)
+        out(req)
+    if FU.get("late_old_completion"):
+        completed(tid, "turn-1")
+    if FU.get("hold"):
+        return
+    out({"method": "item/completed", "params": {"threadId": tid, "turnId": turn_id,
+         "item": {"type": "agentMessage", "id": "m%d" % n, "text": "reply %d" % n,
+                  "phase": "final_answer"}}})
+    completed(tid, turn_id)
+    if FU.get("late_response"):
+        out({"id": rid, "result": {"turn": turn}})
 
 POLICY = {
     "read-only": {"type": "readOnly", "networkAccess": False},
@@ -330,7 +372,8 @@ for line in sys.stdin:
         else:
             out({"id": rid, "result": {}})
         out({"method": "turn/completed", "params": {"threadId": CUR.get("tid"), "turn": {
-            "id": "turn-1", "status": SC.get("interrupt_status", "interrupted"),
+            "id": CUR.get("turn", "turn-1"),
+            "status": SC.get("interrupt_status", "interrupted"),
             "items": [], "error": None}}})
     elif method == "config/read":
         out({"id": rid, "result": {"config": SC.get("config", {}), "origins": {}}})
@@ -397,6 +440,10 @@ for line in sys.stdin:
         out({"id": rid, "result": {"data": [thread(t) for t in SC.get("listed", [])]}})
     elif method == "turn/start":
         tid = CUR["tid"] = msg["params"]["threadId"]
+        CUR["n"] = CUR.get("n", 0) + 1
+        if CUR["n"] >= 2:
+            followup(rid, tid, CUR["n"])
+            continue
         turn = {"id": "turn-1", "status": "inProgress", "items": []}
         out({"id": rid, "result": {"turn": turn}})
         if "exit_after_turn_start" in SC:
@@ -1949,10 +1996,15 @@ async def test_cancel_falls_back_to_teardown_when_the_turn_never_ends(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:
     fake = Fake(
-        tmp_path, hold_turn=True, ignore_interrupt=True, notifications=[_cmd_started()]
+        tmp_path,
+        hold_turn=True,
+        ignore_interrupt=True,
+        notifications=[_cmd_started()],
+        linger=True,  # and ignores stdin closing (#964 §16 item 4 closes it)
     )
+    runner = _runner(fake, interrupt_bound_s=0.3, exit_grace_s=0.5)
     with capture_logs() as logs:
-        await _cancel_when(_runner(fake, interrupt_bound_s=0.3), _command_started)
+        await _cancel_when(runner, _command_started)
     assert len(fake.requests("turn/interrupt")) == 1
     [log] = _interrupt_logs(logs)
     assert log["ok"] is False

@@ -69,6 +69,22 @@ async def test_before_send_sees_the_id_before_the_write() -> None:
     assert len(sink.chunks) == 1
 
 
+async def test_after_send_runs_once_the_line_is_written() -> None:
+    """#964 review H2: a caller learns the line is out before ``submit``
+    returns; a failed write never calls it."""
+    sink = Sink()
+    peer = CodexRpcPeer(sink.send)
+    seen: list[tuple[int, int]] = []
+    rid = await peer.submit(
+        "turn/start", {}, after_send=lambda r: seen.append((r, len(sink.chunks)))
+    )
+    assert seen == [(rid, 1)]
+    peer.close("done")
+    with pytest.raises(CodexRpcClosed):
+        await peer.submit("turn/start", {}, after_send=lambda r: seen.append((r, -1)))
+    assert seen == [(rid, 1)]
+
+
 async def test_responses_match_by_id_out_of_order_and_carry_the_method() -> None:
     peer = CodexRpcPeer(Sink().send)
     await peer.submit("initialize")
