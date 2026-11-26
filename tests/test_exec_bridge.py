@@ -2686,6 +2686,57 @@ async def test_codex_resumed_run_accounts_token_delta() -> None:
 
 
 @pytest.mark.anyio
+async def test_runner_completed_logs_session_compactions() -> None:
+    """#1182 end to end: a flagged compaction bumps the session count, the
+    header shows it (``🗜️ N`` with no %), ``runner.completed`` logs it, and a
+    resumed run of the same session carries on from it."""
+    sid = f"claude-1182-{uuid.uuid4().hex[:8]}"
+
+    async def run_once(resume: bool) -> FakeTransport:
+        transport = FakeTransport()
+        runner = ScriptRunner(
+            [
+                Emit(
+                    action_completed(
+                        "claude.compaction.1",
+                        "note",
+                        "🗜️ Context compacted",
+                        ok=True,
+                        detail={"trigger": "manual", "compaction": True},
+                        engine="claude",
+                    )
+                ),
+                Return(answer="ok"),
+            ],
+            engine="claude",
+            resume_value=sid,
+        )
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="go"),
+            resume_token=ResumeToken(engine="claude", value=sid) if resume else None,
+        )
+        return transport
+
+    with structlog.testing.capture_logs() as logs:
+        first = await run_once(resume=False)
+        second = await run_once(resume=True)
+    counted = [e for e in logs if e["event"] == "session.compaction_counted"]
+    assert [(e["engine"], e["count"]) for e in counted] == [
+        ("claude", 1),
+        ("claude", 2),
+    ]
+    completed = [e for e in logs if e["event"] == "runner.completed"]
+    assert [e["session_compactions"] for e in completed] == [1, 2]
+    for transport, n in ((first, 1), (second, 2)):
+        header = transport.send_calls[-1]["message"].text.splitlines()[0]
+        assert header.endswith(f" · 🗜️ {n}")
+
+
+@pytest.mark.anyio
 async def test_codex_usage_accounted_once_per_run() -> None:
     from untether.session_costs import get_session_cost_ledger
 

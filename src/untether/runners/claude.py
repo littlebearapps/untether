@@ -5597,6 +5597,9 @@ def _translate_compact_boundary(
                 "trigger": trigger,
                 "pre_tokens": pre_tokens,
                 "post_tokens": post_tokens,
+                # #1182: the one event the session compaction count counts
+                # (the ``success`` status row shares this id: never flag it).
+                "compaction": True,
             },
         ),
         *_emit_context(state, factory),

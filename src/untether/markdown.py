@@ -63,21 +63,27 @@ def format_header(
     engine: str,
     context_pct: int | None = None,
     context_estimated: bool = False,
+    compactions: int = 0,
 ) -> str:
-    """``label · engine · elapsed[ · step N][ · N% ctx]``.
+    """``label · engine · elapsed[ · step N][ · N% ctx[ (C)]]``.
 
     #819: ``context_pct`` (context-window use) is appended last, with no
     emoji, and omitted when unknown. #979: ``context_estimated`` marks a
     value measured against a published window the engine does not report
-    (Antigravity) — shown as ``~N% ctx``.
+    (Antigravity) — shown as ``~N% ctx``. #1182: ``compactions`` (the
+    session's count) follows the % in brackets, or stands alone as
+    ``🗜️ C`` when there is no % (D1 A); nothing while it is 0.
     """
     elapsed = format_elapsed(elapsed_s)
     parts = [label, engine]
     parts.append(elapsed)
     if item is not None:
         parts.append(f"step {item}")
+    count = f" ({compactions})" if compactions > 0 else ""
     if context_pct is not None:
-        parts.append(f"{'~' if context_estimated else ''}{context_pct}% ctx")
+        parts.append(f"{'~' if context_estimated else ''}{context_pct}% ctx{count}")
+    elif count:
+        parts.append(f"\N{COMPRESSION}\N{VARIATION SELECTOR-16} {compactions}")
     return HEADER_SEP.join(parts)
 
 
@@ -699,6 +705,10 @@ class MarkdownFormatter:
     def _context_pct(self, state: ProgressState) -> int | None:
         return state.context_pct if self.show_context_usage else None
 
+    def _compactions(self, state: ProgressState) -> int:
+        # #1182: the same gate hides the count with the %.
+        return state.compactions if self.show_context_usage else 0
+
     def render_progress_parts(
         self,
         state: ProgressState,
@@ -715,6 +725,7 @@ class MarkdownFormatter:
             engine=state.engine,
             context_pct=self._context_pct(state),
             context_estimated=state.context_estimated,
+            compactions=self._compactions(state),
         )
         body = self._assemble_body(self._format_actions(state, now=now))
         if state.background:
@@ -740,6 +751,7 @@ class MarkdownFormatter:
             engine=state.engine,
             context_pct=self._context_pct(state),
             context_estimated=state.context_estimated,
+            compactions=self._compactions(state),
         )
         answer = (answer or "").strip()
         body = answer if answer else None
