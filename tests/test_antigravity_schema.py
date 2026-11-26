@@ -53,6 +53,7 @@ _FIXTURE_SOURCES: dict[str, str] = {
     "subagents_timer_any": "1.3.5/rc5-1086 two subagents + 60 s timer with TimerCondition any + kill_all, accept-edits (1.3.5; ids synthetic, agent text condensed, #1086)",
     "resume_kept_shell": "1.3.3/rc4-a3 Full access conversation resumed with --agent=untether-workspace (1.3.3; id synthetic, #1060)",
     "compact": "1.3.5/rc7-1114 /compact on a resumed conversation, accept-edits + untether-workspace (1.3.5)",
+    "warm_two_turns": "1.5.17/rc6-977 P1: one warm process, two stdin lines, accept-edits, default agent (1.5.17; id synthetic, #977)",
     "synthetic_no_result": "synthetic: ok minus its result line",
     "synthetic_result_then_agy_error": "synthetic: ok + AGY_ERROR stderr after the result, rc 3",
     "synthetic_agy_error_rc3": "synthetic: partial deltas, no result, AGY_ERROR, rc 3",
