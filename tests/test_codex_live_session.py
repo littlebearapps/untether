@@ -13,6 +13,7 @@ All against the fake app-server in ``test_codex_app_server_runner``.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 from pathlib import Path
@@ -37,6 +38,7 @@ from untether.live_followup import inject_live_followup
 from untether.live_sessions import live_backend
 from untether.model import CompletedEvent, TurnEvent
 from untether.runners import codex_app_server as gate
+from untether.runners.codex_rpc import CodexRpcPeer, Response, RpcError
 from untether.runners.run_options import EngineRunOptions, apply_run_options
 from untether.scheduler import ThreadJob
 
@@ -658,3 +660,189 @@ async def test_a_live_run_that_fails_before_any_turn_ends(
     events = await _per_run(Fake(tmp_path, resume_error=True))
     assert isinstance(events[-1], CompletedEvent) and not events[-1].ok
     assert gate._RUNS_BY_THREAD == {}
+
+
+# --- adversarial review of 3b ------------------------------------------------
+
+_ASK = EngineRunOptions(permission_mode="ask")
+
+
+async def _live_ask(fake: Fake, body: Any, **attrs: Any) -> LiveRun:
+    run = LiveRun(_live_runner(fake, **attrs))
+    with apply_run_options(_ASK), anyio.fail_after(30):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run.consume)
+            await run.until(_completed_run)
+            await body(run)
+            await run.close()
+    return run
+
+
+@pytest.mark.anyio
+async def test_trust_removed_while_idle_closes_and_resumes_read_only(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """§16 item 6: the trust Codex applies is re-read (config/read) before a
+    follow-up; on drift the session closes (``trust_changed``) and the
+    message resumes through a fresh spawn, which decides read-only."""
+    cfg = tmp_path / "codex-config.json"
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    cfg.write_text(json.dumps(trusted))
+    fake = Fake(tmp_path, config_file=str(cfg))
+    outcomes: list[bool] = []
+
+    async def body(run: LiveRun) -> None:
+        cfg.write_text(json.dumps({"projects": {}}))  # trust removed
+        with capture_logs() as logs:
+            outcomes.append(
+                await BACKEND.inject_when_idle(THREAD, "x", command_uuid="f1")
+            )
+            with anyio.fail_after(10):
+                await run.done.wait()
+        changed = _events(logs, "codex.live_session.trust_changed")
+        assert [e["reason"] for e in changed] == ["drift"]
+        closed = _events(logs, "codex.live_session.stdin_closed")
+        assert [e["reason"] for e in closed] == ["trust_changed"]
+
+    await _live_ask(fake, body)
+    assert outcomes == [False]
+    assert len(fake.requests("turn/start")) == 1  # never written into it
+    assert fake.requests("thread/resume")[0]["sandbox"] == "workspace-write"
+    with apply_run_options(_ASK), anyio.fail_after(20):
+        [e async for e in _rt._runner(fake).run("x", RESUME)]
+    assert fake.requests("thread/resume")[1]["sandbox"] == "read-only"
+
+
+@pytest.mark.anyio
+async def test_unverifiable_trust_fails_closed(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    flag = tmp_path / "config-broken"
+    fake = Fake(tmp_path, config=trusted, config_error_file=str(flag))
+    outcomes: list[Any] = []
+
+    async def body(run: LiveRun) -> None:
+        flag.write_text("x")
+        with capture_logs() as logs:
+            outcomes.append(await BACKEND.steer(THREAD, "y", command_uuid="s1"))
+            with anyio.fail_after(10):
+                await run.done.wait()
+        changed = _events(logs, "codex.live_session.trust_changed")
+        assert [e["reason"] for e in changed] == ["unverifiable"]
+
+    await _live_ask(fake, body)
+    assert outcomes == ["options_changed"]
+    assert len(fake.requests("turn/start")) == 1
+
+
+@pytest.mark.anyio
+async def test_unchanged_trust_still_takes_the_followup(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    fake = Fake(tmp_path, config=trusted)
+
+    async def body(run: LiveRun) -> None:
+        assert await BACKEND.inject_when_idle(THREAD, "x", command_uuid="f1")
+        await run.until(_turn_done(2))
+
+    await _live_ask(fake, body)
+    assert len(fake.requests("config/read")) == 2  # spawn + the follow-up
+
+
+@pytest.mark.anyio
+async def test_lifecycle_runs_under_steady_stdout(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Frames faster than ``live_poll_s`` never starve the lifecycle: the
+    idle close happens, and a process that ignores it (busy writing, never
+    reading stdin) is escalated after the exit grace."""
+    _settings(monkeypatch, grace=0.3)
+    fake = Fake(tmp_path, chatter=30)
+    run = LiveRun(_live_runner(fake, live_poll_s=0.2, exit_grace_s=0.3))
+    with apply_run_options(None), anyio.fail_after(30), capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run.consume)
+            await run.until(_completed_run)
+            with anyio.fail_after(8):
+                await run.done.wait()
+    closed = _events(logs, "codex.live_session.stdin_closed")
+    assert [e["reason"] for e in closed] == ["idle_no_tasks"]
+
+
+def _expired_followup_state() -> tuple[Any, Any]:
+    runner = _rt._bare_runner()
+    state = _rt._app_state(runner)
+    state.live_mode = True
+    state.completed_turns = 2
+    wait = gate._StartWait(command_uuid="old", text="t")
+    wait.rid = 9
+    state.pending_start = wait
+    state.followup_rids.add(9)
+    assert gate._expire_stale_start(state, wait.at + 1e6) is False
+    state.turn_open, state.turn_id = True, "turn-new"  # a newer turn runs
+    return runner, state
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"result": {"turn": {"id": "turn-old"}}},
+        {"error": RpcError(code=-32600, message="late refusal")},
+    ],
+)
+def test_late_answer_of_an_expired_followup_is_ignored(answer: dict) -> None:
+    runner, state = _expired_followup_state()
+    state.inbound = Response(9, "turn/start", **answer)
+    with capture_logs() as logs:
+        events = runner.translate(b"", state=state, resume=None, found_session=None)
+    assert state.turn_id == "turn-new"  # /cancel still targets the current turn
+    assert not any(isinstance(e, CompletedEvent) for e in events)
+    assert len(_events(logs, "codex.app_server.followup_late_answer")) == 1
+
+
+@pytest.mark.anyio
+async def test_a_steer_blocked_behind_the_writer_never_writes_after_close() -> None:
+    """#775 for Codex: close_steer_window (the /cancel path) returns only
+    once no steer can still be written; one queued behind the writer is
+    refused (``window_closed``, so the caller queues it)."""
+    sent: list[bytes] = []
+    release = anyio.Event()
+
+    async def send(data: bytes) -> None:
+        if not release.is_set():
+            await release.wait()
+        sent.append(data)
+
+    state = _rt._app_state(_rt._bare_runner())
+    state.live_mode = True
+    state.completed_turns = 1
+    state.turn_open, state.turn_id = True, "turn-2"
+    state.peer = CodexRpcPeer(send)
+    gate._RUNS_BY_THREAD[THREAD] = state
+    results: list[Any] = []
+    closed = anyio.Event()
+
+    async def steer() -> None:
+        results.append(await BACKEND.steer(THREAD, "late", command_uuid="u1"))
+
+    async def close() -> None:
+        await BACKEND.close_steer_window(THREAD, "cancel")
+        closed.set()
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(state.peer.notify, "busy", {})  # holds the writer
+            await anyio.sleep(0.05)
+            tg.start_soon(steer)
+            await anyio.sleep(0.05)
+            tg.start_soon(close)
+            await anyio.sleep(0.05)
+            release.set()
+            await closed.wait()
+    assert results == ["window_closed"]
+    assert not any(b"turn/steer" in line for line in sent)

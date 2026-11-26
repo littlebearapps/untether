@@ -378,7 +378,13 @@ for line in sys.stdin:
             "status": SC.get("interrupt_status", "interrupted"),
             "items": [], "error": None}}})
     elif method == "config/read":
-        out({"id": rid, "result": {"config": SC.get("config", {}), "origins": {}}})
+        # #964-3b: a config file the test rewrites while the session lives.
+        if SC.get("config_error_file") and os.path.exists(SC["config_error_file"]):
+            out({"id": rid, "error": {"code": -32603, "message": "config unreadable"}})
+            continue
+        cfg = (json.load(open(SC["config_file"])) if SC.get("config_file")
+               else SC.get("config", {}))
+        out({"id": rid, "result": {"config": cfg, "origins": {}}})
     elif method in ("thread/start", "thread/resume"):
         p = msg["params"]
         if method == "thread/resume" and SC.get("resume_error"):
@@ -496,6 +502,11 @@ for line in sys.stdin:
         out({"method": "turn/completed", "params": {"threadId": tid, "turn": {
             "id": "turn-1", "status": SC.get("status", "completed"), "items": [],
             "error": SC.get("turn_error")}}})
+        if SC.get("chatter"):  # #964-3b: steady stdout, never reading stdin
+            end = time.time() + SC["chatter"]
+            while time.time() < end:
+                out({"method": "brand/new", "params": {}})
+                time.sleep(0.02)
 if SC.get("linger"):
     time.sleep(30)
 """

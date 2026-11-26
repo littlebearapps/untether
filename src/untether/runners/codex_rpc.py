@@ -129,13 +129,19 @@ class CodexRpcPeer:
         self.deferred: dict[RequestId, str] = {}
         self.closed_reason: str | None = None
 
-    async def _write(self, message: dict[str, Any]) -> None:
+    async def _write(
+        self, message: dict[str, Any], guard: Callable[[], bool] | None = None
+    ) -> None:
         if self.closed_reason is not None:
             raise CodexRpcClosed(self.closed_reason)
         data = msgspec.json.encode(message) + b"\n"
         try:
             with anyio.fail_after(self._write_timeout):
                 async with self._lock:
+                    if guard is not None and not guard():
+                        # #964: checked under the writer lock, right before
+                        # the line goes out (see ``write_barrier``).
+                        raise CodexRpcClosed("guard")
                     await self._send(data)
         except TimeoutError as exc:
             raise CodexRpcWriteTimeout(
@@ -156,13 +162,15 @@ class CodexRpcPeer:
         *,
         before_send: Callable[[int], None] | None = None,
         after_send: Callable[[int], None] | None = None,
+        guard: Callable[[], bool] | None = None,
     ) -> int:
         """Write a request; returns its id without waiting for the answer.
 
         ``before_send(rid)`` runs before the write, so a caller can register
         a waiter the reader can't miss (#964: the response may be read
         before ``submit`` returns). ``after_send(rid)`` runs as soon as the
-        write is done, before ``submit`` returns."""
+        write is done, before ``submit`` returns. ``guard()`` False under
+        the writer lock: nothing is written (``CodexRpcClosed("guard")``)."""
         rid = self._next_id
         self._next_id += 1
         message: dict[str, Any] = {"method": method, "id": rid}
@@ -172,7 +180,7 @@ class CodexRpcPeer:
         if before_send is not None:
             before_send(rid)
         try:
-            await self._write(message)
+            await self._write(message, guard)
         except BaseException:
             self.pending.pop(rid, None)
             raise
@@ -185,6 +193,12 @@ class CodexRpcPeer:
         if params is not None:
             message["params"] = params
         await self._write(message)
+
+    async def write_barrier(self) -> None:
+        """Wait out any write in progress: a ``guard`` changed before this
+        returns is seen by every write after it (#964 steer window)."""
+        async with self._lock:
+            pass
 
     def forget(self, rid: RequestId) -> None:
         self.pending.pop(rid, None)
