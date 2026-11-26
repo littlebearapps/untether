@@ -7,8 +7,9 @@ Telegram loop ask this module for the engine's :class:`LiveSessionBackend`
 rather than testing ``engine == "claude"`` and importing the Claude runner's
 registry functions themselves.
 
-Claude is the only backend today. Its adapter resolves every function on
-``untether.runners.claude`` **at call time** and forwards the caller's
+Claude and Codex app-server (#964) are the backends. Claude's adapter
+resolves every function on ``untether.runners.claude`` **at call time** and
+forwards the caller's
 arguments untouched, so behaviour, call shapes and monkeypatches are exactly
 what the direct imports gave. This module imports no runner at import time
 (``runners/claude.py`` imports ``runner.py``, which imports this).
@@ -231,8 +232,115 @@ class _ClaudeLive:
         return await self._claude().wait_for_session_handoff(session_id, timeout_s)
 
 
-# Static on purpose: no entry points until a second engine needs one.
-_BACKENDS: dict[str, LiveSessionBackend] = {"claude": _ClaudeLive()}
+class _CodexLive:
+    """Codex app-server's backend (#964): the run states in
+    ``untether.runners.codex_app_server._RUNS_BY_THREAD``, resolved at call
+    time like ``_ClaudeLive``. A run kept live (``live_mode``) takes
+    follow-ups; a per-run one is only a steer target (964-2). On the exec
+    transport there is never an entry, and steer reports "not supported"."""
+
+    engine = "codex"
+    display_name = "Codex"
+    log_ns = "codex"
+
+    @staticmethod
+    def _cas() -> ModuleType:
+        return importlib.import_module("untether.runners.codex_app_server")
+
+    @property
+    def supports_steer(self) -> bool:
+        return bool(self._cas().APP_SERVER_ACTIVE)
+
+    def enabled(self) -> bool:
+        # `[watchdog] live_sessions` is read per spawn (as Claude's): a run
+        # not kept live is never accepting.
+        return bool(self._cas().APP_SERVER_ACTIVE)
+
+    def _live(self, session_id: str) -> Any:
+        return self._cas()._live(session_id)
+
+    def get(self, session_id: str) -> Any:
+        live = self._live(session_id)
+        return live if live is not None else self._cas().STEER_BACKEND.get(session_id)
+
+    def is_accepting(self, session_id: str) -> bool:
+        return bool(self._cas()._accepting(self._live(session_id)))
+
+    def idle_count(self) -> int:
+        cas = self._cas()
+        return sum(
+            1
+            for s in cas._RUNS_BY_THREAD.values()
+            if s.live_mode and not s.closing and cas._is_idle(s)
+        )
+
+    def linger_info(self, session_id: str) -> tuple[bool, int] | None:
+        live = self._live(session_id)
+        return None if live is None else (bool(self._cas()._is_idle(live)), 0)
+
+    def turn_pending(self, session_id: str) -> bool:
+        live = self._live(session_id)
+        return live is not None and not self._cas()._is_idle(live)
+
+    def live_bg_count(self, session_id: str) -> int:
+        return 0  # no stable background-terminal list (D3, #967)
+
+    async def interrupt_pending_turn(
+        self, session_id: str, *, any_turn: bool = False
+    ) -> bool:
+        return await self._cas().interrupt_pending_turn(session_id, any_turn=any_turn)
+
+    def holds_background_jobs(self, session_id: str) -> bool:
+        return False
+
+    def spawn_options(self, session_id: str) -> Any:
+        live = self._live(session_id)
+        return None if live is None else live.spawn_options
+
+    def spawn_cwd(self, session_id: str) -> Path | None:
+        live = self._live(session_id)
+        return None if live is None else live.spawn_cwd
+
+    def pre_inject_close_reason(self, session_id: str) -> str | None:
+        return None
+
+    async def close_idle_for_continue(self, cwd: Path | None) -> int:
+        return await self._cas().close_idle_for_continue(cwd)
+
+    async def inject_when_idle(
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
+    ) -> bool:
+        return await self._cas().inject_when_idle(
+            session_id, text, command_uuid=command_uuid, **kwargs
+        )
+
+    async def close(self, session_id: str, reason: str, **kwargs: Any) -> bool:
+        return await self._cas().close_live_session(session_id, reason, **kwargs)
+
+    def add_listener(
+        self, session_id: str, callback: Callable[[str, dict[str, Any]], Any]
+    ) -> bool:
+        state = self._cas()._RUNS_BY_THREAD.get(session_id)
+        if state is None:
+            return False
+        state.listeners.append(callback)
+        return True
+
+    async def close_steer_window(self, session_id: str, reason: str) -> bool:
+        return await self._cas().close_steer_window(session_id, reason)
+
+    async def steer(self, session_id: str, text: str, **kwargs: Any) -> Any:
+        return await self._cas().steer_into_session(session_id, text, **kwargs)
+
+    async def wait_for_handoff(self, session_id: str, timeout_s: float) -> Any:
+        return await self._cas().wait_for_handoff(session_id, timeout_s)
+
+
+# Static on purpose: no entry points until a third engine needs one.
+_BACKENDS: dict[str, LiveSessionBackend] = {
+    "claude": _ClaudeLive(),
+    "codex": _CodexLive(),  # #964
+}
 
 
 def live_backend(engine: str | None) -> LiveSessionBackend | None:
@@ -249,8 +357,6 @@ def live_backend(engine: str | None) -> LiveSessionBackend | None:
 # paths must not see it). Resolved lazily: the module imports the registry.
 _STEER_ONLY: dict[str, tuple[str, str]] = {
     "antigravity": ("untether.antigravity.gate_server", "STEER_BACKEND"),
-    # #964: ``turn/steer`` into the running app-server turn (per-run process).
-    "codex": ("untether.runners.codex_app_server", "STEER_BACKEND"),
 }
 
 

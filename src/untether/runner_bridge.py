@@ -6933,6 +6933,7 @@ def _live_died_notice(
     signal_name: str | None,
     tasks: list[str],
     quarantined: bool,
+    name: str = "Claude",
 ) -> str:
     """#1001: an idle live session's process died without a close by
     Untether (killed from outside, OOM, a crash between turns). Says how it
@@ -6946,7 +6947,7 @@ def _live_died_notice(
         how = f"exit code {rc}"
     else:
         how = "the process exited"
-    head = f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The Claude session ended unexpectedly ({how})"
+    head = f"\N{WARNING SIGN}\N{VARIATION SELECTOR-16} The {name} session ended unexpectedly ({how})"
     n = len(tasks)
     if n:
         names = ", ".join(t[:60] for t in tasks[:3])
@@ -9136,6 +9137,8 @@ async def handle_message(
             ),
             tasks=tasks,
             quarantined=payload.get("quarantined") is True,
+            # #964: Codex app-server sessions die too.
+            name=getattr(live_backend(runner.engine), "display_name", "Claude"),
         )
         try:
             await cfg.transport.send(

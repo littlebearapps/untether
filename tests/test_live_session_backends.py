@@ -1,7 +1,7 @@
 """The engine-neutral live-session seam (#977): ``untether.live_sessions``.
 
-Claude is the only registered backend. These tests pin the properties the
-gate sites rely on: an unknown engine has no backend, the Claude adapter
+Claude and Codex app-server (#964) are the registered backends. These pin
+the properties the gate sites rely on: an unknown engine has no backend, the Claude adapter
 looks its functions up on ``untether.runners.claude`` at call time (so the
 existing suites' monkeypatches and direct registry pokes keep working), and
 the per-engine idle count never raises.
@@ -128,7 +128,7 @@ async def test_claude_adapter_resolves_functions_at_call_time(
 
 
 @pytest.mark.parametrize(
-    "engine", [None, "", "codex", "opencode", "pi", "antigravity", "gemini", "amp"]
+    "engine", [None, "", "opencode", "pi", "antigravity", "gemini", "amp"]
 )
 def test_live_backend_unknown_engine_is_none(engine: str | None) -> None:
     assert live_backend(engine) is None
@@ -147,6 +147,24 @@ def test_claude_backend_identity() -> None:
     )
     assert backend.supports_steer is True
     assert backend.enabled() is True
+
+
+def test_codex_backend_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    from untether.runners import codex_app_server as cas
+
+    backend = live_backend("codex")
+    assert backend is not None and backend is live_backend("codex")
+    assert (backend.engine, backend.display_name, backend.log_ns) == (
+        "codex",
+        "Codex",
+        "codex",
+    )
+    # Steer and follow-ups exist only on the app-server transport (#964).
+    monkeypatch.setattr(cas, "APP_SERVER_ACTIVE", False)
+    assert backend.supports_steer is False and backend.enabled() is False
+    assert supports_live_session("codex") is False
+    monkeypatch.setattr(cas, "APP_SERVER_ACTIVE", True)
+    assert backend.supports_steer is True and backend.enabled() is True
 
 
 def test_claude_adapter_reads_live_registry_directly(
@@ -196,20 +214,20 @@ def test_supports_live_session_respects_watchdog_and_engine_kill_switches(
 
 
 def test_idle_counts_per_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert idle_live_session_counts() == {"claude": 0}
+    assert idle_live_session_counts() == {"claude": 0, "codex": 0}
 
     live = _install(monkeypatch, idle=True)
-    assert idle_live_session_counts() == {"claude": 1}
+    assert idle_live_session_counts() == {"claude": 1, "codex": 0}
 
     live.closing = True  # closing sessions are not "idle and holding a slot"
-    assert idle_live_session_counts() == {"claude": 0}
+    assert idle_live_session_counts() == {"claude": 0, "codex": 0}
     live.closing = False
 
     monkeypatch.setitem(live_sessions._BACKENDS, "fake", _FakeBackend(idle=2))
-    assert idle_live_session_counts() == {"claude": 1, "fake": 2}
+    assert idle_live_session_counts() == {"claude": 1, "codex": 0, "fake": 2}
 
     # Diagnostics must never block a spawn: a failing backend counts as zero.
     monkeypatch.setitem(
         live_sessions._BACKENDS, "fake", _FakeBackend(idle=RuntimeError("boom"))
     )
-    assert idle_live_session_counts() == {"claude": 1, "fake": 0}
+    assert idle_live_session_counts() == {"claude": 1, "codex": 0, "fake": 0}

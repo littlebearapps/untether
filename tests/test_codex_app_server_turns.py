@@ -91,9 +91,9 @@ class LiveRun:
         return gate._RUNS_BY_THREAD[THREAD]
 
     async def close(self) -> None:
-        """End the process the way 964-3b's close will: close stdin."""
+        """End the process with the live session's close (964-3b)."""
         if not self.done.is_set():
-            await self.state.proc.stdin.aclose()
+            await gate.close_live_session(THREAD, "new")
         with anyio.fail_after(10):
             await self.done.wait()
 
@@ -799,11 +799,13 @@ async def test_an_exit_that_cannot_be_confirmed_keeps_the_thread_owned(
 
     monkeypatch.setattr(gate.CodexAppServerRunner, "_close_process", not_gone)
     fake = Fake(tmp_path)
-    with capture_logs() as logs:
-        await _rt._run(_rt._runner(fake), resume=RESUME)
-    state = gate._RUNS_BY_THREAD[THREAD]
-    assert state.closing is True and gate.STEER_BACKEND.get(THREAD) is None
-    assert [
-        e["thread_id"] for e in logs if e["event"] == "codex.app_server.thread_kept"
-    ] == [THREAD]
-    gate._RUNS_BY_THREAD.clear()
+    try:
+        with capture_logs() as logs:
+            await _rt._run(_rt._runner(fake), resume=RESUME)
+        state = gate._RUNS_BY_THREAD[THREAD]
+        assert state.closing is True and gate.STEER_BACKEND.get(THREAD) is None
+        assert [
+            e["thread_id"] for e in logs if e["event"] == "codex.app_server.thread_kept"
+        ] == [THREAD]
+    finally:
+        gate._RUNS_BY_THREAD.clear()  # never leaks into later tests

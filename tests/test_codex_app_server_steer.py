@@ -311,14 +311,15 @@ def test_get_refuses_a_finished_or_unstarted_turn() -> None:
 def test_exec_transport_reports_engine_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    build_runner({"transport": "app-server"}, tmp_path)
+    runner = build_runner({"transport": "app-server"}, tmp_path)
     assert gate.APP_SERVER_ACTIVE is True
-    assert steer_backend("codex") is STEER and STEER.supports_steer
+    # #964-3b: the live-session backend is the steer target too.
+    assert steer_backend("codex") is live_backend("codex")
+    assert steer_backend("codex").supports_steer and STEER.supports_steer
+    assert runner.keep_live is True
     build_runner({}, tmp_path)
     assert gate.APP_SERVER_ACTIVE is False
     assert not steer_backend("codex").supports_steer
-    # A steer target only: never a live-session backend (964-3 adds that).
-    assert live_backend("codex") is None
     assert STEER.engine == "codex" and STEER.display_name == "Codex"
 
 

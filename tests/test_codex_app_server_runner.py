@@ -308,6 +308,8 @@ def followup(rid, tid, n):
     if FU.get("error"):
         out({"id": rid, "error": {"code": -32600, "message": FU["error"]}})
         return
+    if FU.get("swallow"):
+        return  # #964-3b: no answer and no turn, ever
     if FU.get("start_delay"):
         time.sleep(FU["start_delay"])
     early = FU.get("early_started") or FU.get("late_response")
@@ -489,6 +491,8 @@ for line in sys.stdin:
                  "item": {"type": "agentMessage", "id": f"m{i}", "text": text, "phase": phase}}})
         if SC.get("exit_before_complete"):
             sys.exit(0)
+        if SC.get("complete_delay"):
+            time.sleep(SC["complete_delay"])  # #964-3b: a long first turn
         out({"method": "turn/completed", "params": {"threadId": tid, "turn": {
             "id": "turn-1", "status": SC.get("status", "completed"), "items": [],
             "error": SC.get("turn_error")}}})
