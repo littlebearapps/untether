@@ -396,6 +396,39 @@ def test_permission_mode_on_compacting_frame_still_noted() -> None:
     assert state.effective_permission_mode == "plan"
 
 
+# ── #1182: the one event that counts as a compaction ────────────────────────
+
+
+def test_boundary_completion_carries_compaction_flag() -> None:
+    state = _first_run_state()
+    _feed(state, _compacting())
+    _feed(state, _status_done("success"))
+    [row] = _rows(_feed(state, _boundary()))
+    assert row.phase == "completed"
+    assert row.action.detail["compaction"] is True
+
+
+def test_success_status_row_has_no_flag() -> None:
+    """The ``success`` status and the boundary complete the same row id, so
+    only the boundary may carry the flag (else every compaction counts 2)."""
+    state = _first_run_state()
+    _feed(state, _compacting())
+    [done] = _rows(_feed(state, _status_done("success")))
+    assert "compaction" not in (done.action.detail or {})
+
+
+def test_failed_and_skipped_rows_have_no_flag() -> None:
+    state = _first_run_state()
+    _feed(state, _compacting())
+    [failed] = _rows(_feed(state, _status_done("failed")))
+    _feed(state, _compacting())
+    [skipped] = _rows(_feed(state, _status_done(None)))
+    _feed(state, _compacting())
+    [started] = _rows(_feed(state, _compacting()))
+    for row in (failed, skipped, started):
+        assert "compaction" not in (row.action.detail or {})
+
+
 def test_boundary_clears_context_pct() -> None:
     claude_mod._CONTEXT_WINDOWS[HAIKU] = 200_000
     state = _first_run_state()

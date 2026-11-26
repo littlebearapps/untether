@@ -629,3 +629,65 @@ def test_token_ledger_cancelled_first_run_is_not_outside_untether() -> None:
         "codex", "u", _tok(300, 20), scope="thread_cumulative", resumed=True
     )
     assert unseen.source == "baseline_unknown"
+
+
+# ── #1182: per-session compaction count ─────────────────────────────────────
+
+
+def test_bump_compactions_counts_per_session(tmp_path: Path) -> None:
+    ledger = SessionCostLedger.load(tmp_path / "session_costs.json")
+    assert ledger.bump_compactions("claude", "s1") == 1
+    assert ledger.bump_compactions("claude", "s1") == 2
+    assert ledger.bump_compactions("claude", "s2") == 1
+    assert ledger.compactions("claude", "s1") == 2
+    assert ledger.compactions("claude", "s2") == 1
+
+
+def test_compactions_zero_for_unknown_session(tmp_path: Path) -> None:
+    ledger = SessionCostLedger.load(tmp_path / "session_costs.json")
+    assert ledger.compactions("claude", "nope") == 0
+    ledger.record("claude", "cost-only", 1.0, resumed=False)
+    assert ledger.compactions("claude", "cost-only") == 0
+
+
+def test_compactions_survive_reload(tmp_path: Path) -> None:
+    path = tmp_path / "session_costs.json"
+    ledger = SessionCostLedger.load(path)
+    ledger.bump_compactions("claude", "s1")
+    ledger.bump_compactions("claude", "s1")
+    assert SessionCostLedger.load(path).compactions("claude", "s1") == 2
+
+
+def test_compactions_keyed_per_engine(tmp_path: Path) -> None:
+    ledger = SessionCostLedger.load(tmp_path / "session_costs.json")
+    ledger.bump_compactions("claude", "same")
+    assert ledger.compactions("codex", "same") == 0
+
+
+def test_compactions_merge_with_cost_and_token_entry(tmp_path: Path) -> None:
+    path = tmp_path / "session_costs.json"
+    ledger = SessionCostLedger.load(path)
+    ledger.record("claude", "s1", 1.5, resumed=False)
+    ledger.bump_compactions("claude", "s1")
+    ledger.record("claude", "s1", 2.0, resumed=True)
+    entry = json.loads(path.read_text())["claude:s1"]
+    assert entry["cost"] == 2.0
+    assert entry["compactions"] == 1
+
+
+def test_bump_refreshes_ts_for_prune(tmp_path: Path) -> None:
+    path = tmp_path / "session_costs.json"
+    old = time.time() - 29 * 24 * 3600
+    path.write_text(json.dumps({"claude:s1": {"compactions": 3, "ts": old}}))
+    ledger = SessionCostLedger.load(path)
+    assert ledger.bump_compactions("claude", "s1") == 4
+    assert json.loads(path.read_text())["claude:s1"]["ts"] > old + 24 * 3600
+
+
+@pytest.mark.parametrize("bad", ["2", True, -1, None, 1.5])
+def test_compactions_malformed_value_reads_zero(tmp_path: Path, bad: Any) -> None:
+    path = tmp_path / "session_costs.json"
+    path.write_text(json.dumps({"claude:s1": {"compactions": bad, "ts": time.time()}}))
+    ledger = SessionCostLedger.load(path)
+    assert ledger.compactions("claude", "s1") == 0
+    assert ledger.bump_compactions("claude", "s1") == 1

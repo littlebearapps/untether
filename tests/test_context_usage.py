@@ -326,6 +326,46 @@ def test_tracker_telemetry_without_context_key_ignored() -> None:
     assert tracker.action_count == 0
 
 
+# ── #1182: session compaction count ─────────────────────────────────────────
+
+
+def _compactions(value: Any) -> ActionEvent:
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id="untether.compactions",
+            kind="telemetry",
+            title="compactions",
+            detail={"compactions": value},
+        ),
+        phase="updated",
+    )
+
+
+def test_tracker_telemetry_sets_compactions() -> None:
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(_telemetry(40))
+    assert tracker.note_event(_compactions(2)) is True
+    assert tracker.compactions == 2
+    assert tracker.context_pct == 40  # a count-only event leaves the % alone
+    assert tracker.action_count == 0
+    assert tracker.snapshot().compactions == 2
+
+
+@pytest.mark.parametrize("bad", [-1, True, "2", None, 1.5])
+def test_tracker_telemetry_compactions_rejects_bad_values(bad: Any) -> None:
+    tracker = ProgressTracker(engine="claude")
+    tracker.note_event(_compactions(1))
+    assert tracker.note_event(_compactions(bad)) is False
+    assert tracker.compactions == 1
+
+
+def test_tracker_compactions_same_value_returns_false() -> None:
+    tracker = ProgressTracker(engine="claude")
+    assert tracker.note_event(_compactions(1)) is True
+    assert tracker.note_event(_compactions(1)) is False
+
+
 # ── maths ───────────────────────────────────────────────────────────────────
 
 
@@ -798,11 +838,58 @@ def test_format_header_omits_context_when_none() -> None:
     )
 
 
-def _rendered(show: bool, pct: int | None) -> tuple[str, str, str | None]:
+def test_header_ctx_with_compaction_count() -> None:
+    assert (
+        format_header(
+            96.0, 10, label="done", engine="claude", context_pct=41, compactions=2
+        )
+        == "done · claude · 1m 36s · step 10 · 41% ctx (2)"
+    )
+
+
+def test_header_estimated_ctx_with_count() -> None:
+    assert (
+        format_header(
+            5.0,
+            None,
+            label="working",
+            engine="antigravity",
+            context_pct=41,
+            context_estimated=True,
+            compactions=1,
+        )
+        == "working · antigravity · 5s · ~41% ctx (1)"
+    )
+
+
+def test_header_count_without_pct_uses_icon() -> None:
+    """D1 A: a count but no % (Pi always; Claude just after a boundary)."""
+    assert (
+        format_header(12.0, 3, label="done", engine="pi", compactions=2)
+        == "done · pi · 12s · step 3 · 🗜️ 2"
+    )
+
+
+def test_header_no_bracket_when_zero() -> None:
+    assert (
+        format_header(12.0, None, label="done", engine="claude", context_pct=8)
+        == format_header(
+            12.0, None, label="done", engine="claude", context_pct=8, compactions=0
+        )
+        == "done · claude · 12s · 8% ctx"
+    )
+    assert "🗜" not in format_header(12.0, None, label="done", engine="claude")
+
+
+def _rendered(
+    show: bool, pct: int | None, compactions: int = 0
+) -> tuple[str, str, str | None]:
     tracker = ProgressTracker(engine="claude")
     tracker.meta = {"model": HAIKU}
     if pct is not None:
         tracker.note_event(_telemetry(pct))
+    if compactions:
+        tracker.note_event(_compactions(compactions))
     state = tracker.snapshot(
         context_line="dir: z80", meta_formatter=lambda m: "haiku 4.5"
     )
@@ -830,6 +917,23 @@ def test_formatter_show_context_usage_false_hides_segment() -> None:
     progress, final, _ = _rendered(False, 62)
     assert "ctx" not in progress
     assert "ctx" not in final
+
+
+def test_progress_and_final_headers_show_count() -> None:
+    progress, final, _ = _rendered(True, 62, compactions=2)
+    assert progress == "working · claude · 12s · 62% ctx (2)"
+    assert final == "done · claude · 12s · 62% ctx (2)"
+    progress, final, _ = _rendered(True, None, compactions=1)
+    assert progress.endswith(" · 🗜️ 1") and final.endswith(" · 🗜️ 1")
+
+
+@pytest.mark.parametrize("pct", [62, None])
+def test_show_context_usage_false_hides_count(pct: int | None) -> None:
+    progress, final, _ = _rendered(False, pct, compactions=2)
+    for header in (progress, final):
+        assert "ctx" not in header
+        assert "(2)" not in header
+        assert "🗜" not in header
 
 
 # ── #979: an engine-estimated value (``~N% ctx``) on the same path ──────────

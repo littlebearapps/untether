@@ -8,7 +8,7 @@ import re
 import signal as _signal
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -2458,6 +2458,85 @@ def _compaction_usage(usage: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """#819: the runner's ``usage["compaction"]`` (Claude), or None."""
     raw = (usage or {}).get("compaction")
     return raw if isinstance(raw, dict) else None
+
+
+_COMPACTIONS_TELEMETRY_ID = "untether.compactions"
+
+
+async def _with_compaction_counts(
+    events: AsyncIterator[UntetherEvent],
+    *,
+    engine: str,
+    resume: ResumeToken | None,
+) -> AsyncIterator[UntetherEvent]:
+    """#1182: the session compaction count, at the one ``runner.run`` call site.
+
+    Yields every runner event unchanged. A completed ``ActionEvent`` whose
+    ``detail["compaction"] is True`` (each runner flags only a *successful*
+    compaction) bumps the session ledger once per action id, then a
+    ``telemetry`` event ``{"compactions": n}`` follows it. Each
+    ``StartedEvent`` and live ``TurnEvent(started)`` is followed by the
+    ledger's count when it is above 0, so a resumed run and a fresh live-turn
+    tracker show it from the start. Telemetry is never exported and never
+    forces a turn's progress message. Ledger errors are logged, never raised.
+    """
+    from .session_costs import get_session_cost_ledger
+
+    session_id = resume.value if resume is not None and resume.value else None
+    counted: set[str] = set()
+    factory = EventFactory(engine=engine)
+
+    def telemetry(count: int) -> ActionEvent:
+        return factory.action_updated(
+            action_id=_COMPACTIONS_TELEMETRY_ID,
+            kind="telemetry",
+            title="compactions",
+            detail={"compactions": count},
+        )
+
+    try:
+        async for evt in events:
+            yield evt
+            count = 0
+            try:
+                if isinstance(evt, StartedEvent):
+                    session_id = evt.resume.value or session_id
+                    if session_id:
+                        count = get_session_cost_ledger().compactions(
+                            engine, session_id
+                        )
+                elif isinstance(evt, TurnEvent) and evt.phase == "started":
+                    if session_id:
+                        count = get_session_cost_ledger().compactions(
+                            engine, session_id
+                        )
+                elif (
+                    isinstance(evt, ActionEvent)
+                    and evt.phase == "completed"
+                    and (evt.action.detail or {}).get("compaction") is True
+                    and session_id
+                ):
+                    action_id = str(evt.action.id or "")
+                    if action_id not in counted:
+                        counted.add(action_id)
+                        count = get_session_cost_ledger().bump_compactions(
+                            engine, session_id
+                        )
+                        logger.info(
+                            "session.compaction_counted",
+                            engine=engine,
+                            session_id=session_id,
+                            count=count,
+                            action_id=action_id,
+                        )
+            except Exception:  # noqa: BLE001 — accounting must never break delivery
+                logger.warning("session.compaction_count_failed", exc_info=True)
+                count = 0
+            if count > 0:
+                yield telemetry(count)
+    finally:
+        # #614: close the runner's generator in this (the bridge's) task.
+        await _close_runner_events(events)
 
 
 def _compaction_manual_success(usage: Mapping[str, Any] | None) -> bool:
@@ -5875,7 +5954,11 @@ async def run_runner_with_cancel(
         async with anyio.create_task_group() as tg:
 
             async def run_runner() -> None:
-                events = runner.run(prompt, resume_token)
+                events = _with_compaction_counts(
+                    runner.run(prompt, resume_token),
+                    engine=runner.engine,
+                    resume=resume_token,
+                )
                 try:
                     async for evt in events:
                         _log_runner_event(evt)
@@ -8096,6 +8179,9 @@ async def handle_message(
         if (compaction := _compaction_usage(completed.usage)) is not None:
             usage_log["compactions"] = compaction.get("count")
             usage_log["compaction_trigger"] = compaction.get("trigger")
+        # #1182: the session's count so far (seeded from the ledger).
+        if t_tracker.compactions > 0:
+            usage_log["session_compactions"] = t_tracker.compactions
         # #1123: this result's throttling (Claude reports a per-result delta).
         throttle = (completed.usage or {}).get("throttle")
         if isinstance(throttle, dict):

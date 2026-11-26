@@ -4,6 +4,7 @@
 
 ### changes
 
+- **feat:** the status line shows how many times the session has been compacted, in brackets after the context %: `41% ctx (2)` (or `🗜️ 2` when there is no %). The count is kept per session, so it survives follow-ups, resumes and restarts, and `/new` starts again at 0. Claude chats first [#1182](https://github.com/littlebearapps/untether/issues/1182)
 - **feat(codex):** Codex can run over `codex app-server` instead of `codex exec` (opt-in with `[engines.codex] transport = "app-server"`; exec stays the default): the same rows and resume lines, `/cancel` through Codex's own `turn/interrupt`, typed error hints, retry and warning rows, and read-only runs in projects Codex doesn't trust, because Untether never grants trust [#962](https://github.com/littlebearapps/untether/issues/962)
 - **feat(codex):** Codex app-server chats show Codex's own context use (`N% ctx`) in the progress header and a 🗜️ row when Codex compacts [#832](https://github.com/littlebearapps/untether/issues/832)
 - **feat(triggers):** crons and webhooks can set their own `env` variables and, for Claude, an `agent` (`--agent`) for their runs only; names the service or engine manages are refused at config load, and values are never logged [#1121](https://github.com/littlebearapps/untether/issues/1121)

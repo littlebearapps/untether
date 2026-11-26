@@ -75,6 +75,8 @@ class ProgressState:
     # #979: the value is measured against a published window the engine
     # does not report itself (Antigravity) — shown as ``~N% ctx``.
     context_estimated: bool = False
+    # #1182: successful compactions in this session (from the session ledger).
+    compactions: int = 0
 
 
 def close_open_actions(state: ProgressState) -> ProgressState:
@@ -115,6 +117,8 @@ class ProgressTracker:
         self.context_pct: int | None = None
         # #979: True only when the engine marked the value as an estimate.
         self.context_estimated = False
+        # #1182: the session's compaction count, header-only.
+        self.compactions = 0
 
     def note_event(self, event: UntetherEvent) -> bool:
         match event:
@@ -174,19 +178,30 @@ class ProgressTracker:
 
     def _note_telemetry(self, detail: dict[str, Any]) -> bool:
         """#819: apply a ``telemetry`` ActionEvent. True only when the shown
-        value changed (a re-render is owed)."""
+        value changed (a re-render is owed). #1182: ``compactions`` (the
+        session's count) may come alone or beside ``context_pct``."""
+        changed = False
+        count = detail.get("compactions")
+        if (
+            isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 0
+            and count != self.compactions
+        ):
+            self.compactions = count
+            changed = True
         if "context_pct" not in detail:
-            return False
+            return changed
         value = detail["context_pct"]
         if value is not None and (
             not isinstance(value, int)
             or isinstance(value, bool)
             or not 0 <= value <= 100
         ):
-            return False
+            return changed
         estimated = detail.get("context_estimated") is True
         if value == self.context_pct and estimated == self.context_estimated:
-            return False
+            return changed
         self.context_pct = value
         self.context_estimated = estimated
         return True
@@ -268,4 +283,5 @@ class ProgressTracker:
             meta_line=meta_line,
             context_pct=self.context_pct,
             context_estimated=self.context_estimated,
+            compactions=self.compactions,
         )

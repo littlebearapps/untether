@@ -236,6 +236,23 @@ class SessionCostLedger:
         entry.update(started_here=True, ts=time.time())
         self._flush()
 
+    def compactions(self, engine: str, session_id: str) -> int:
+        """#1182: successful compactions Untether has seen in this session."""
+        entry = self._entries.get(_key(engine, session_id)) or {}
+        count = entry.get("compactions")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            return count
+        return 0
+
+    def bump_compactions(self, engine: str, session_id: str) -> int:
+        """#1182: count one more compaction for the session; returns the new
+        total. Refreshes ``ts`` so a long-lived session isn't pruned."""
+        count = self.compactions(engine, session_id) + 1
+        entry = self._entries.setdefault(_key(engine, session_id), {})
+        entry.update(compactions=count, ts=time.time())
+        self._flush()
+        return count
+
     def record_tokens(
         self,
         engine: str,
