@@ -34,6 +34,7 @@ from .. import __version__
 from ..events import EventFactory
 from ..interactive.registry import drop_session, register, withdraw
 from ..logging import get_logger
+from ..markdown import format_duration
 from ..model import (
     ActionEvent,
     ActionPhase,
@@ -414,6 +415,9 @@ COMPACT_NO_CONVERSATION_BLOCK = "compact_no_conversation"
 APP_SERVER_ACTIVE = False
 # #964: how long a steer waits for Codex's answer (Codex answers in ms, P-S1).
 STEER_RESPONSE_S = 5.0
+# #964-3a: the same bound for a follow-up turn/start.
+FOLLOWUP_RESPONSE_S = 5.0
+_TURN_EXITED = "codex app-server exited before the turn finished"
 _SYSTEM_ERROR_NOTE = (
     "Codex reported a system error on this thread; the turn may not finish."
 )
@@ -679,6 +683,25 @@ class AppServerRunState(CodexRunState):
     # #1412 item 1: thread/status/changed activeFlags per thread (sub-agent
     # threads too), set while ``active``.
     waiting: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # #964-3a turn state machine (plan §16 items 2-5). ``live_mode``: the
+    # process stays up after the first turn (964-3b decides when); later
+    # turns are TurnEvent segments. ``turn_open`` spans turn/started ..
+    # turn/completed of the main thread; ``completed_turns`` counts them.
+    # ``live_mode`` / ``turn_open`` / ``completed_turns`` are duck-typed by
+    # the bridge's live-session predicates.
+    live_mode: bool = False
+    turn_open: bool = False
+    completed_turns: int = 0
+    turn_reason: str = "unknown"
+    turn_command_uuid: str | None = None
+    # The follow-up turn/start in flight (one at a time).
+    pending_start: _StartWait | None = None
+    # Set when the run ends; the thread stays owned until the process exits.
+    closing: bool = False
+    # ``clock.sleep`` items by id → monotonic deadline; duck-typed by the
+    # bridge's stall monitor as an expected wait (``_has_pending_wakeup``)
+    # and its countdown.
+    live_wakeups: dict[str, float] = field(default_factory=dict)
 
     # Duck-typed by the stall watchdogs (``runner._approval_pending``, the
     # bridge's ``_has_pending_approval``): Codex is waiting on the user.
@@ -698,9 +721,49 @@ class _SteerWait:
     done: anyio.Event = field(default_factory=anyio.Event)
 
 
-# #964: the run that owns each thread right now (one per run until live
-# sessions, 964-3). Set when the thread opens, dropped when the run ends.
+@dataclass(slots=True)
+class _StartWait:
+    """One follow-up ``turn/start`` (§16 item 2). ``rid`` is set before the
+    write; ``turn_id`` by its response or an earlier ``turn/started``."""
+
+    command_uuid: str
+    text: str
+    rid: int | None = None
+    turn_id: str | None = None
+    sent: bool = False
+    accepted: bool = False
+    absorbed: bool = False
+    timed_out: bool = False
+    # Its turn/started has been seen (attributed).
+    started: bool = False
+    error: str | None = None
+    done: anyio.Event = field(default_factory=anyio.Event)
+
+
+def _settle_start(state: AppServerRunState, wait: _StartWait) -> None:
+    """Drop the in-flight start once nothing more can attribute to it:
+    refused or absorbed, or accepted / timed out with its turn started. An
+    accepted start whose turn hasn't started stays, so its turn/started (the
+    answer can come first) is still the follow-up's."""
+    if state.pending_start is not wait:
+        return
+    if (
+        wait.error is not None
+        or wait.absorbed
+        or (wait.started and (wait.accepted or wait.timed_out))
+    ):
+        state.pending_start = None
+
+
+# #964: the run that owns each thread right now. Set when the thread opens;
+# released only once the run's process has exited (§16 item 4), and only by
+# the run that still owns it.
 _RUNS_BY_THREAD: dict[str, AppServerRunState] = {}
+
+
+def _release_thread(state: AppServerRunState) -> None:
+    if state.thread_id and _RUNS_BY_THREAD.get(state.thread_id) is state:
+        del _RUNS_BY_THREAD[state.thread_id]
 
 
 class CodexAppServerRunner(CodexRunner):
@@ -712,6 +775,9 @@ class CodexAppServerRunner(CodexRunner):
     transport = "app-server"
     # #1412 item 1: the watchdogs read ``awaiting_user_approval``.
     _EXPOSE_ENGINE_STATE = True
+    # #964-3a: keep the process after the first turn. Off: 964-3b turns it
+    # on per run (``[watchdog] live_sessions``, attended runs only).
+    keep_live = False
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
@@ -745,6 +811,7 @@ class CodexAppServerRunner(CodexRunner):
             factory=EventFactory(ENGINE),
             prompt=prompt,
             manual_compact=resume is not None and _is_compact(prompt),
+            live_mode=self.keep_live,
         )
 
     def build_args(
@@ -833,8 +900,12 @@ class CodexAppServerRunner(CodexRunner):
         # 962-4) never loses bytes this one buffered.
         state.reader = BufferedByteReceiveStream(stdout)
         peer: CodexRpcPeer = state.peer
+        # #964-3a: a live run keeps reading after its first turn.
+        stream.followup_turns = state.live_mode
         try:
-            while state.stopped is None and not stream.did_emit_completed:
+            while state.stopped is None and (
+                state.live_mode or not stream.did_emit_completed
+            ):
                 try:
                     line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
                 except (anyio.IncompleteRead, anyio.ClosedResourceError):
@@ -855,7 +926,9 @@ class CodexAppServerRunner(CodexRunner):
                         ):
                             yield evt
                     state.inbound = None
-                    while state.outbox and not stream.did_emit_completed:
+                    while state.outbox and (
+                        state.live_mode or not stream.did_emit_completed
+                    ):
                         kind, method, params = state.outbox.pop(0)
                         if kind == "notify":
                             await peer.notify(method, params)
@@ -865,27 +938,40 @@ class CodexAppServerRunner(CodexRunner):
                             await peer.submit(method, params)
                 except (CodexRpcClosed, CodexRpcWriteTimeout) as exc:
                     self._stop(state, exc)
+            if state.turn_open and state.completed_turns:
+                # A later turn the process never finished (EOF / exit).
+                yield self._turn_completed_event(
+                    state, ok=False, answer=self._answer(state), error=_TURN_EXITED
+                )
         except (anyio.get_cancelled_exc_class(), GeneratorExit):
             # /cancel: the bridge cancelled the run (at a read) or closed this
             # generator (at a yield). Stop the turn natively, then re-raise.
-            await self._interrupt(state, stream)
+            await self._interrupt(state)
             raise
         finally:
             self._end_run(state)
-        peer.close("done" if stream.did_emit_completed else "eof")
-        await self._close_process(state.proc)
+            peer.close("done" if stream.did_emit_completed else "eof")
+            # §16 item 4: the thread is released only once the process is
+            # gone (bounded; SIGTERM after the grace), so a run resuming it
+            # never meets a process that still holds it.
+            with anyio.CancelScope(shield=True):
+                await self._close_process(state.proc)
+            _release_thread(state)
 
     @staticmethod
     def _end_run(state: AppServerRunState) -> None:
         """The run is over: no more steers into it (#964; a steer still
         waiting stays unconfirmed, never re-queued), no waiting flags, and a
         later tap on one of its cards reads "session ended" (#963)."""
-        if state.thread_id and _RUNS_BY_THREAD.get(state.thread_id) is state:
-            del _RUNS_BY_THREAD[state.thread_id]
+        state.closing = True
         for wait in state.steer_waits.values():
             wait.done.set()
         state.steer_waits.clear()
+        if state.pending_start is not None:
+            state.pending_start.done.set()
+            state.pending_start = None
         state.waiting.clear()
+        state.live_wakeups.clear()
         cards = state.cards
         if cards is None:
             return
@@ -894,20 +980,23 @@ class CodexAppServerRunner(CodexRunner):
         if dropped:
             logger.info("codex.app_server.approvals_dropped", cleaned=dropped)
 
-    async def _interrupt(
-        self, state: AppServerRunState, stream: JsonlStreamState
-    ) -> None:
-        """``turn/interrupt``, bounded and shielded: Codex ends the turn in
-        ~0.1 s and exits once stdin closes, so teardown finds it gone. On
-        timeout the base teardown's SIGTERM is the fallback."""
+    async def _interrupt(self, state: AppServerRunState) -> None:
+        """``turn/interrupt`` for the *current* turn, bounded and shielded:
+        Codex ends it in ~0.1 s and exits once stdin closes, so teardown finds
+        it gone. On timeout the base teardown's SIGTERM is the fallback.
+
+        §16 item 3: the target is the open turn by its id (a later turn of a
+        live run too); in the window where a follow-up is written but its
+        turn isn't known yet, that turn is waited for first. Idle: nothing
+        to interrupt. One reader: the run's own buffered stream."""
         peer = state.peer
+        target = state.turn_id if state.turn_open or not state.completed_turns else None
         if (
-            stream.did_emit_completed
-            or state.stopped is not None
+            state.stopped is not None
             or state.thread_id is None
-            or state.turn_id is None
+            or (target is None and state.pending_start is None)
         ):
-            peer.close("cancelled")  # handshake cancel: plain teardown
+            peer.close("cancelled")  # handshake or idle: plain teardown
             return
         started = time.monotonic()
         ok = False
@@ -916,22 +1005,22 @@ class CodexAppServerRunner(CodexRunner):
             anyio.move_on_after(self.interrupt_bound_s),
         ):
             try:
+                while target is None:
+                    target = self._started_turn(await self._read_message(state), state)
                 # Never await the answer: this loop is the only reader.
                 await peer.submit(
-                    "turn/interrupt",
-                    {"threadId": state.thread_id, "turnId": state.turn_id},
+                    "turn/interrupt", {"threadId": state.thread_id, "turnId": target}
                 )
-                # The same buffered reader, so a part-read line isn't lost.
                 while not ok:
-                    line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
-                    msg = await peer.feed(line)
-                    # An error answer ("no active turn") is ignored; any
-                    # turn/completed (interrupted, or a finish that won the
-                    # race) ends the turn.
+                    msg = await self._read_message(state)
+                    # An error answer ("no active turn") is ignored; the
+                    # target's turn/completed (interrupted, or a finish that
+                    # won the race) ends it. Another turn's never does.
                     ok = (
                         isinstance(msg, Notification)
                         and msg.method == "turn/completed"
                         and msg.params.get("threadId") == state.thread_id
+                        and (msg.params.get("turn") or {}).get("id") == target
                     )
                 peer.close("cancelled")
                 with contextlib.suppress(Exception):
@@ -949,9 +1038,37 @@ class CodexAppServerRunner(CodexRunner):
         logger.info(
             "codex.app_server.interrupt",
             ok=ok,
+            turn_id=target,
             elapsed_s=round(time.monotonic() - started, 3),
             open_items_closed=closed,
         )
+
+    @staticmethod
+    async def _read_message(state: AppServerRunState) -> Any:
+        """One message through the run's buffered reader (a part-read line
+        is never lost) and its peer."""
+        line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
+        return await state.peer.feed(line)
+
+    @staticmethod
+    def _started_turn(msg: Any, state: AppServerRunState) -> str | None:
+        """While cancelling a written follow-up: the id of the turn it
+        started (its turn/started or its turn/start answer), else None."""
+        if (
+            isinstance(msg, Notification)
+            and msg.method == "turn/started"
+            and msg.params.get("threadId") == state.thread_id
+        ):
+            return (msg.params.get("turn") or {}).get("id")
+        wait = state.pending_start
+        if isinstance(msg, Response) and wait is not None and msg.id == wait.rid:
+            if msg.error is not None:
+                raise RuntimeError("follow-up refused")  # nothing started
+            turn = (
+                (msg.result or {}).get("turn") if isinstance(msg.result, dict) else None
+            )
+            return turn.get("id") if isinstance(turn, dict) else None
+        return None
 
     async def _close_process(self, proc: Any) -> None:
         """Close stdin (the app-server exits in ~0.1 s), then a bounded wait:
@@ -1174,6 +1291,8 @@ class CodexAppServerRunner(CodexRunner):
             action_id=action_id,
             label=card.label,
             decisions=card.decisions,
+            # §16 item 5: the main turn it arrived in (a sub-agent's card too).
+            turn_id=state.turn_id,
         )
         cards.by_rpc[msg.id] = request_id
         logger.info(
@@ -1228,14 +1347,24 @@ class CodexAppServerRunner(CodexRunner):
             detail={"request_id": request_id},
         )
 
-    def _retire_cards(self, state: AppServerRunState) -> list[UntetherEvent]:
-        """Cards still open when the turn ends: Codex has cleared them."""
+    def _retire_cards(
+        self, state: AppServerRunState, turn_id: str | None = None
+    ) -> list[UntetherEvent]:
+        """Cards still open when their turn ends: Codex has cleared them.
+        Only that turn's (§16 item 5); ``None`` retires every card."""
         cards = state.cards
         if cards is None or not cards.pending:
             return []
-        rows = [self._close_card(state, rid, p) for rid, p in cards.pending.items()]
-        cards.pending.clear()
-        cards.by_rpc.clear()
+        ending = [
+            rid
+            for rid, p in cards.pending.items()
+            if turn_id is None or p.turn_id in (None, turn_id)
+        ]
+        rows = []
+        for rid in ending:
+            pending = cards.pending.pop(rid)
+            cards.by_rpc.pop(pending.rpc_id, None)
+            rows.append(self._close_card(state, rid, pending))
         return rows
 
     def _review_rows(
@@ -1366,6 +1495,16 @@ class CodexAppServerRunner(CodexRunner):
                         thread_id=state.thread_id,
                         count=state.compactions,
                     )
+            case cas.SleepItem():
+                # Codex's ``clock.sleep`` (seen in 964-0): an expected wait
+                # with a known end, read by the bridge's stall monitor.
+                title = f"\N{HOURGLASS WITH FLOWING SAND} sleeping {format_duration(item.duration_ms / 1000)}"
+                if phase == "started":
+                    state.live_wakeups[item.id] = (
+                        time.monotonic() + item.duration_ms / 1000
+                    )
+                else:
+                    state.live_wakeups.pop(item.id, None)
             case cas.CollabAgentToolCallItem():
                 kind, status = "subagent", item.status
                 title = item.prompt or item.tool or "sub-agent"
@@ -1447,6 +1586,9 @@ class CodexAppServerRunner(CodexRunner):
             # #964: the steer's own answer; never the run's error.
             self._on_steer_response(msg, state)
             return []
+        wait = state.pending_start
+        if msg.method == "turn/start" and wait is not None and msg.id == wait.rid:
+            return self._on_start_response(msg, state, wait)  # never the run's error
         if msg.error is not None:
             # Codex's own text: the bridge matches "no rollout found" (#952).
             return [
@@ -1507,6 +1649,44 @@ class CodexAppServerRunner(CodexRunner):
         else:
             wait.accepted = True
         wait.done.set()
+
+    def _on_start_response(
+        self, msg: Response, state: AppServerRunState, wait: _StartWait
+    ) -> list[UntetherEvent]:
+        """§16 item 2: Codex's answer to a follow-up turn/start. It names the
+        turn the text went into: a new one (its turn/started is, or was,
+        attributed to the follow-up) or, through ``start_or_steer_turn``, a
+        turn already running for someone else (absorbed: one row, no turn)."""
+        rows: list[UntetherEvent] = []
+        turn = msg.result.get("turn") if isinstance(msg.result, dict) else None
+        turn_id = turn.get("id") if isinstance(turn, dict) else None
+        if msg.error is not None or not isinstance(turn_id, str):
+            wait.error = msg.error.message if msg.error else "no turn id"
+        elif wait.turn_id is None and state.turn_open and state.turn_id == turn_id:
+            wait.absorbed = True
+            logger.info(
+                "codex.app_server.followup_absorbed",
+                turn_id=turn_id,
+                command_uuid=wait.command_uuid,
+            )
+            state.note_seq += 1
+            rows = state.factory.steer_received(
+                action_id=f"codex.followup.{state.note_seq}",
+                text=wait.text,
+                command_uuid=wait.command_uuid,
+            )
+        else:
+            if wait.turn_id is not None and wait.turn_id != turn_id:
+                logger.warning(
+                    "codex.app_server.followup_turn_mismatch",
+                    attributed=wait.turn_id,
+                    answered=turn_id,
+                )
+            wait.turn_id = wait.turn_id or turn_id
+            wait.accepted = True
+        _settle_start(state, wait)
+        wait.done.set()
+        return self._rows(state, rows)
 
     def _decide_sandbox(self, state: AppServerRunState, result: Any) -> None:
         """Full auto omits ``sandbox`` (Codex's own setting), and Ask me /
@@ -1735,8 +1915,7 @@ class CodexAppServerRunner(CodexRunner):
             return []  # a sub-agent thread's item or error
         match msg.method:
             case "turn/started":
-                state.turn_id = params.turn.id
-                state.turn_agent_messages.clear()
+                return self._on_turn_started(params.turn, state=state)
             case "thread/status/changed":
                 return self._on_thread_status(params, state=state)
             case "item/started":
@@ -1767,6 +1946,67 @@ class CodexAppServerRunner(CodexRunner):
                     params.turn, state=state, resume=resume, found_session=found_session
                 )
         return []
+
+    def _on_turn_started(
+        self, turn: cas.Turn, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """Opens the main thread's turn and resets turn-local state (§16
+        item 5). In a live run every turn after the first is a TurnEvent
+        segment: ``followup`` with its message's ``command_uuid`` when it is
+        the written follow-up's turn (the answer can come before or after
+        this, P9), else ``unknown`` (a turn Codex started itself, Δ D43)."""
+        state.turn_id = turn.id
+        state.turn_open = True
+        state.turn_agent_messages.clear()
+        state.card_stop = False
+        if not (state.live_mode and state.completed_turns):
+            return []
+        state.ctx_emitted = None  # re-show % ctx for this turn
+        wait = state.pending_start
+        reason, command_uuid = "unknown", None
+        if wait is not None and wait.turn_id in (None, turn.id):
+            wait.turn_id, wait.started = turn.id, True
+            reason, command_uuid = "followup", wait.command_uuid
+            _settle_start(state, wait)
+        state.turn_reason, state.turn_command_uuid = reason, command_uuid
+        logger.info(
+            "codex.app_server.turn_started",
+            turn=state.completed_turns + 1,
+            turn_id=turn.id,
+            reason=reason,
+            command_uuid=command_uuid,
+        )
+        return [
+            state.factory.turn_started(
+                turn=state.completed_turns + 1,
+                reason=reason,  # type: ignore[arg-type]
+                command_uuid=command_uuid,
+            )
+        ]
+
+    def _turn_completed_event(
+        self,
+        state: AppServerRunState,
+        *,
+        ok: bool,
+        answer: str,
+        error: str | None = None,
+        usage: dict[str, Any] | None = None,
+    ) -> UntetherEvent:
+        """A later turn's closing TurnEvent; the turn is over."""
+        state.turn_open = False
+        state.completed_turns += 1
+        command_uuid = state.turn_command_uuid
+        state.turn_command_uuid = None
+        return state.factory.turn_completed(
+            turn=state.completed_turns,
+            ok=ok,
+            answer=answer,
+            reason=state.turn_reason,  # type: ignore[arg-type]
+            error=error,
+            usage=self._run_usage(state, usage),
+            command_uuid=command_uuid,
+        )
 
     def _on_thread_status(
         self, params: cas.ThreadStatusChangedParams, *, state: AppServerRunState
@@ -1905,8 +2145,19 @@ class CodexAppServerRunner(CodexRunner):
         resume: ResumeToken | None,
         found_session: ResumeToken | None,
     ) -> list[UntetherEvent]:
+        if turn.id and state.turn_id and turn.id != state.turn_id:
+            # §16 item 3/5: an earlier turn's late completion never ends (or
+            # retires the cards of) the current one.
+            logger.info("codex.app_server.stale_turn_completed", turn_id=turn.id)
+            return []
         state.saw_result = True  # sub-agent turns are filtered out upstream
-        cards = self._retire_cards(state)  # #963: none may keep its buttons
+        cards = self._retire_cards(state, turn.id)  # #963: none keep buttons
+        state.file_changes.clear()  # §16 item 5: per turn, bounded
+        state.live_wakeups.clear()
+        if state.live_mode and state.completed_turns:
+            return [*cards, *self._later_turn_completed(turn, state)]
+        state.turn_open = False
+        state.completed_turns += 1
         if turn.status == "completed":
             usage = None
             if state.manual_compact:
@@ -1945,6 +2196,30 @@ class CodexAppServerRunner(CodexRunner):
             if resets_at:
                 usage["codex_resets_at"] = resets_at
         return [*rows, self._error(state, resume, error, usage)]
+
+    def _later_turn_completed(
+        self, turn: cas.Turn, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """A live run's later turn: its TurnEvent (never a CompletedEvent)."""
+        answer = self._answer(state)
+        if turn.status == "completed":
+            return [self._turn_completed_event(state, ok=True, answer=answer)]
+        rows = self._close_open_items(
+            state, "cancelled" if turn.status == "interrupted" else "failed"
+        )
+        error = (turn.error.message if turn.error else "") or (
+            f"Codex turn {turn.status}"
+        )
+        if state.card_stop and turn.status == "interrupted":
+            error = _STOPPED_BY_CARD
+        code = codex_error_code(turn.error.codex_error_info) if turn.error else None
+        usage = {"codex_error_info": code} if code else None
+        return [
+            *rows,
+            self._turn_completed_event(
+                state, ok=False, answer=answer, error=error, usage=usage
+            ),
+        ]
 
     # --- process end -----------------------------------------------------------
 
@@ -2005,8 +2280,9 @@ class _CodexSteer:
         state = _RUNS_BY_THREAD.get(session_id)
         if (
             state is None
+            or state.closing
             or state.stopped is not None
-            or state.saw_result
+            or not state.turn_open
             or state.turn_id is None
             or state.peer is None
             or state.peer.closed_reason is not None
@@ -2072,3 +2348,81 @@ class _CodexSteer:
 
 
 STEER_BACKEND = _CodexSteer()
+
+
+async def start_followup(
+    state: AppServerRunState, text: str, *, command_uuid: str
+) -> str:
+    """#964-3a: a follow-up ``turn/start`` on a live run's idle thread
+    (964-3b's ``inject_when_idle`` calls it under the session lock).
+
+    Only the thread and the text: the thread keeps the approval policy,
+    sandbox and model ``thread/start|resume`` set (§5.4). Outcomes:
+    ``started`` (its turn is, or will be, the follow-up's TurnEvent),
+    ``absorbed`` (Codex put it into a turn already running), ``busy`` (a turn
+    is open or another start is in flight; nothing written), ``closed`` /
+    ``unsent`` (not written), ``refused`` (Codex said no), ``unconfirmed``
+    (sent, never answered: treat as written, never send it twice)."""
+    peer = state.peer
+    if (
+        not state.live_mode
+        or state.closing
+        or state.stopped is not None
+        or peer is None
+        or peer.closed_reason is not None
+    ):
+        return "closed"
+    if state.turn_open or state.pending_start is not None:
+        return "busy"
+    wait = _StartWait(command_uuid=command_uuid, text=text)
+
+    def register(rid: int) -> None:
+        # Before the write, with no await since the checks above.
+        wait.rid = rid
+        state.pending_start = wait
+
+    params = {
+        "threadId": state.thread_id,
+        "input": [{"type": "text", "text": text}],
+        "clientUserMessageId": command_uuid,
+    }
+    try:
+        await peer.submit("turn/start", params, before_send=register)
+    except CodexRpcClosed:
+        if state.pending_start is wait:
+            state.pending_start = None
+        logger.info("codex.app_server.followup_unsent", command_uuid=command_uuid)
+        return "unsent"
+    except CodexRpcWriteTimeout:
+        pass  # part of it may have gone out: unconfirmed, below
+    else:
+        wait.sent = True
+    with anyio.move_on_after(FOLLOWUP_RESPONSE_S):
+        await wait.done.wait()
+    if wait.absorbed:
+        return "absorbed"
+    if wait.error is not None:
+        logger.info(
+            "codex.app_server.followup_refused",
+            command_uuid=command_uuid,
+            reason=wait.error,
+        )
+        return "refused"
+    if wait.accepted or wait.turn_id is not None:
+        if not wait.accepted:  # its turn started; the answer was lost
+            wait.timed_out = True
+            _settle_start(state, wait)
+        logger.info(
+            "codex.app_server.followup_written",
+            command_uuid=command_uuid,
+            turn_id=wait.turn_id,
+        )
+        return "started"
+    wait.timed_out = True
+    _settle_start(state, wait)
+    logger.warning(
+        "codex.app_server.followup_unconfirmed",
+        command_uuid=command_uuid,
+        sent=wait.sent,
+    )
+    return "unconfirmed"

@@ -296,11 +296,14 @@ def test_get_refuses_a_finished_or_unstarted_turn() -> None:
     state.peer = CodexRpcPeer(lambda _b: anyio.lowlevel.checkpoint())
     gate._RUNS_BY_THREAD[THREAD] = state
     assert STEER.get(THREAD) is None  # no turn yet
-    state.turn_id = "turn-1"
+    state.turn_id, state.turn_open = "turn-1", True
     assert STEER.get(THREAD) is state
-    state.saw_result = True
+    state.turn_open = False  # turn/completed
     assert STEER.get(THREAD) is None
-    state.saw_result = False
+    state.turn_open = True
+    state.closing = True  # the run is ending (964-3a)
+    assert STEER.get(THREAD) is None
+    state.closing = False
     state.peer.close("done")
     assert STEER.get(THREAD) is None
 

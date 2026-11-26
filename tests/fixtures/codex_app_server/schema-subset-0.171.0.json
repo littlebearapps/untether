@@ -673,6 +673,14 @@
    },
    "tier": "S"
   },
+  "type ThreadItem.sleep": {
+   "names": {
+    "durationMs": "S",
+    "id": "S",
+    "type": "S"
+   },
+   "tier": "S"
+  },
   "type ThreadItem.webSearch": {
    "names": {
     "action": "S",

@@ -83,6 +83,8 @@ class Pending:
     label: str
     decisions: dict[str, Any]
     answer: str | None = None
+    # #964 §16 item 5: the main turn the card belongs to.
+    turn_id: str | None = None
 
 
 @dataclass(slots=True)

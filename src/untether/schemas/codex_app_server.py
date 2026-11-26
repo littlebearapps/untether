@@ -86,6 +86,7 @@ CODEX_APP_SERVER_TYPES: dict[str, tuple[str, ...]] = {
         "webSearch",
         "imageView",
         "contextCompaction",
+        "sleep",
     ),
     "Turn": (),
     "TurnError": (),
@@ -254,6 +255,14 @@ class ContextCompactionItem(_Wire):
     type: str = "contextCompaction"
 
 
+class SleepItem(_Wire):
+    """#964: Codex's interruptible ``clock.sleep`` tool (seen in 964-0)."""
+
+    id: str
+    duration_ms: int = 0
+    type: str = "sleep"
+
+
 class GenericItem(_Wire):
     """An item type Untether doesn't model, or one that no longer decodes."""
 
@@ -272,6 +281,7 @@ type ThreadItem = (
     | WebSearchItem
     | ImageViewItem
     | ContextCompactionItem
+    | SleepItem
     | GenericItem
 )
 
@@ -285,6 +295,7 @@ THREAD_ITEM_TYPES: dict[str, type[_Wire]] = {
     "webSearch": WebSearchItem,
     "imageView": ImageViewItem,
     "contextCompaction": ContextCompactionItem,
+    "sleep": SleepItem,
 }
 
 
