@@ -5183,7 +5183,12 @@ class ProgressEdits:
                             message_id=self.progress_ref.message_id,
                             rendered=rendered.text,
                         )
-                        with message_kind("progress"):
+                        # #1411: a change of approval buttons jumps the
+                        # outbox queue (KEYBOARD_PRIORITY).
+                        kb_changed = new_kb != old_kb and (
+                            len(new_kb) > 1 or len(old_kb) > 1
+                        )
+                        with message_kind("keyboard" if kb_changed else "progress"):
                             edited = await self.transport.edit(
                                 ref=self.progress_ref,
                                 message=rendered,

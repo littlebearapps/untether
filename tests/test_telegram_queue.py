@@ -1233,3 +1233,67 @@ async def test_client_superseded_edit_returns_sentinel() -> None:
         while len(bot.edit_calls) < 2:
             await anyio.lowlevel.checkpoint()
     assert bot.edit_calls == ["first", "third"]
+
+
+# #1411: an approval keyboard swap is not stuck behind other queued ops.
+
+
+async def _blocked_client_1411() -> tuple[_BlockingEditBot, TelegramClient]:
+    bot = _BlockingEditBot()
+    client = TelegramClient(client=bot, private_chat_rps=0.0, group_chat_rps=0.0)
+    # An unrelated edit holds the worker, so what follows queues together.
+    await client.edit_message_text(chat_id=1, message_id=9, text="busy", wait=False)
+    with anyio.fail_after(1):
+        await bot.edit_started.wait()
+    return bot, client
+
+
+@pytest.mark.anyio
+async def test_1411_keyboard_edit_beats_queued_send() -> None:
+    from untether.transport import message_kind
+
+    bot, client = await _blocked_client_1411()
+    await client.send_message(chat_id=1, text="❌ Denied", wait=False)
+    await client.delete_message(chat_id=1, message_id=7, wait=False)
+    with message_kind("keyboard"):
+        await client.edit_message_text(chat_id=1, message_id=1, text="swap", wait=False)
+    bot.release.set()
+    with anyio.fail_after(1):
+        while len(bot.calls) < 4:
+            await anyio.lowlevel.checkpoint()
+    assert bot.edit_calls == ["busy", "swap"]
+    assert bot.calls[1:] == ["edit_message_text", "send_message", "delete_message"]
+
+
+@pytest.mark.anyio
+async def test_1411_supersede_keeps_keyboard_priority() -> None:
+    """A later plain progress edit of the same message replaces the keyboard
+    edit's content but keeps its place ahead of the queued send."""
+    from untether.transport import message_kind
+
+    bot, client = await _blocked_client_1411()
+    await client.send_message(chat_id=1, text="❌ Denied", wait=False)
+    with message_kind("keyboard"):
+        await client.edit_message_text(chat_id=1, message_id=1, text="swap", wait=False)
+    with message_kind("progress"):
+        await client.edit_message_text(
+            chat_id=1, message_id=1, text="swap + heartbeat", wait=False
+        )
+    bot.release.set()
+    with anyio.fail_after(1):
+        while len(bot.calls) < 3:
+            await anyio.lowlevel.checkpoint()
+    assert bot.edit_calls == ["busy", "swap + heartbeat"]
+    assert bot.calls[1:] == ["edit_message_text", "send_message"]
+
+
+@pytest.mark.anyio
+async def test_1411_plain_edit_still_yields_to_send() -> None:
+    bot, client = await _blocked_client_1411()
+    await client.send_message(chat_id=1, text="final", wait=False)
+    await client.edit_message_text(chat_id=1, message_id=1, text="tick", wait=False)
+    bot.release.set()
+    with anyio.fail_after(1):
+        while len(bot.calls) < 3:
+            await anyio.lowlevel.checkpoint()
+    assert bot.calls[1:] == ["send_message", "edit_message_text"]

@@ -13,6 +13,9 @@ from .client_api import RetryAfter
 
 logger = get_logger(__name__)
 
+#: #1411: an edit that changes approval buttons (``message_kind("keyboard")``)
+#: goes before the tap's feedback send and the push delete.
+KEYBOARD_PRIORITY = -1
 SEND_PRIORITY = 0
 DELETE_PRIORITY = 1
 EDIT_PRIORITY = 2
@@ -130,6 +133,9 @@ class TelegramOutbox:
                     prev_label=previous.label,
                 )
                 op.queued_at = previous.queued_at
+                # #1411: a plain repaint replacing a queued keyboard edit
+                # carries the new buttons too, so it keeps the keyboard's slot.
+                op.priority = min(op.priority, previous.priority)
                 previous.set_result(previous.superseded_result)
             self._pending[key] = op
             self._cond.notify()

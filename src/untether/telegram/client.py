@@ -15,6 +15,7 @@ from .client_api import BotClient, HttpBotClient, SendOutcome, TelegramRetryAfte
 from .outbox import (
     DELETE_PRIORITY,
     EDIT_PRIORITY,
+    KEYBOARD_PRIORITY,
     SEND_PRIORITY,
     SUPERSEDED,
     OutboxOp,
@@ -310,7 +311,9 @@ class TelegramClient:
             key=("edit", chat_id, message_id),
             label="edit_message_text",
             execute=execute,
-            priority=EDIT_PRIORITY,
+            priority=KEYBOARD_PRIORITY
+            if current_message_kind() == "keyboard"
+            else EDIT_PRIORITY,
             chat_id=chat_id,
             wait=wait,
             superseded_result=SUPERSEDED,

@@ -15895,3 +15895,45 @@ async def test_1411_late_reconcile_after_retire_is_harmless() -> None:
     assert "claude_control:approve:rq-b" in after_retire
     assert _kb_data_1411(transport.edit_calls[-1]) == after_retire
     assert edits.tracker._actions["claude.control.1"].completed
+
+
+@pytest.mark.anyio
+async def test_1411_keyboard_transition_edit_uses_keyboard_kind() -> None:
+    """An edit that changes the approval buttons is sent as kind
+    ``keyboard`` (the outbox puts it first); other repaints stay
+    ``progress``."""
+    from untether.runner_bridge import retire_answered_keyboard
+    from untether.transport import current_message_kind
+
+    kinds: list[str | None] = []
+
+    class _KindTransport(FakeTransport):
+        async def edit(self, *, ref, message, wait=True):
+            kinds.append(current_message_kind())
+            return await super().edit(ref=ref, message=message, wait=wait)
+
+    transport = _KindTransport()
+    edits = _edits_1411(transport)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits.run)
+        await edits.on_event(action_started("t-1", "command", "ls"))
+        await _settle_1411()
+        await edits.on_event(_req_action_1411("rq-a", "claude.control.1"))
+        await _settle_1411()
+        await edits.on_event(_req_action_1411("rq-b", "claude.control.2"))
+        await _settle_1411()  # B queued behind A: buttons unchanged
+        assert retire_answered_keyboard("rq-a") is True
+        await _settle_1411()  # A -> B
+        assert retire_answered_keyboard("rq-b") is True
+        await _settle_1411()  # B -> cancel row only
+        await edits.on_event(action_completed("t-1", "command", "ls", ok=True))
+        await _settle_1411()
+        edits.signal_send.close()
+    assert kinds == [
+        "progress",
+        "keyboard",
+        "progress",
+        "keyboard",
+        "keyboard",
+        "progress",
+    ]
