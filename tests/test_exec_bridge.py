@@ -2175,6 +2175,71 @@ async def test_1047_continue_refusal_is_plain_on_the_bridge(blocked: str) -> Non
     assert summary["prespawn_blocked"] == blocked
 
 
+async def _plain_refusal_with(buttons: Any) -> tuple[Any, list[Any]]:
+    from structlog.testing import capture_logs
+
+    from untether.runner import PRESPAWN_BUTTONS_KEY
+
+    transport = FakeTransport()
+    runner = ScriptRunner(
+        [
+            ErrorReturn(
+                error="Ask me isn't available in this project.",
+                usage={
+                    "prespawn_blocked": "gate_foreign_config",
+                    PRESPAWN_BUTTONS_KEY: buttons,
+                },
+            )
+        ],
+        engine="antigravity",
+    )
+    with capture_logs() as logs:
+        await handle_message(
+            ExecBridgeConfig(
+                transport=transport, presenter=MarkdownPresenter(), final_notify=True
+            ),
+            runner=runner,
+            incoming=IncomingMessage(channel_id=123, message_id=10, text="hi"),
+            resume_token=None,
+        )
+    return transport.send_calls[-1]["message"], logs
+
+
+@pytest.mark.anyio
+async def test_1032_plain_refusal_renders_prespawn_buttons() -> None:
+    """#1032: Ask me's foreign-config refusal carries its Trust button."""
+    button = {
+        "text": "🔓 Trust current config…",
+        "callback_data": "agy_trust:ask:ab12cd34",
+    }
+    message, _ = await _plain_refusal_with([[button]])
+    assert message.text == "Ask me isn't available in this project."
+    assert message.extra["reply_markup"] == {"inline_keyboard": [[button]]}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "buttons",
+    [
+        [[{"text": "x", "callback_data": "config:gt:rv"}]],  # other prefix
+        [[{"text": "x", "callback_data": "agy_trust:ask:" + "a" * 60}]],  # > 64 B
+        [[{"text": "x", "callback_data": "agy_trust:ask:1", "url": "https://e"}]],
+        [[{"text": "", "callback_data": "agy_trust:ask:1"}]],
+        [[{"text": "x", "callback_data": 5}]],
+        [{"text": "x", "callback_data": "agy_trust:ask:1"}],  # not a row
+        "agy_trust:ask:1",
+    ],
+)
+async def test_1032_plain_refusal_drops_buttons_with_foreign_prefix_or_long_data(
+    buttons: Any,
+) -> None:
+    """Only ``agy_trust:`` buttons of ``{text, callback_data}`` within
+    Telegram's 64 bytes are rendered; anything else is dropped and logged."""
+    message, logs = await _plain_refusal_with(buttons)
+    assert message.extra["reply_markup"] == {"inline_keyboard": []}
+    assert [r for r in logs if r.get("event") == "handle.prespawn_buttons_dropped"]
+
+
 @pytest.mark.anyio
 async def test_plain_refusal_shows_commands_as_code() -> None:
     """#1080 (AG-56): the refusal's `agy plugin enable …` showed literal

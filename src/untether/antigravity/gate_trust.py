@@ -204,6 +204,14 @@ def agent_problem(scan: antigravity_scan.ScanResult) -> tuple[str, str] | None:
 
 OFFER_MAX = 64
 OFFER_TTL_S = 3600.0
+# The ``agy_trust`` callback-only backend (``telegram/commands/antigravity_trust``).
+CALLBACK_PREFIX = "agy_trust:"
+OFFER_BUTTON_TEXT = "🔓 Trust current config…"
+
+
+def callback_data(action: str, token: str) -> str:
+    """``agy_trust:<ask|yes|no>:<token>`` (well under Telegram's 64 bytes)."""
+    return f"{CALLBACK_PREFIX}{action}:{token}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +223,7 @@ class Offer:
 
 
 _OFFERS: dict[str, Offer] = {}
+_CONFIRMED: set[str] = set()  # offers whose disclosure was shown
 
 
 def _prune(now: float) -> None:
@@ -222,6 +231,7 @@ def _prune(now: float) -> None:
         del _OFFERS[token]
     while len(_OFFERS) >= OFFER_MAX:
         del _OFFERS[next(iter(_OFFERS))]
+    _CONFIRMED.intersection_update(_OFFERS)
 
 
 def register_offer(chat_id: int, root: str, fp: Fingerprint) -> str:
@@ -248,23 +258,66 @@ def _live(token: str, chat_id: int) -> Offer | None:
         return None
     if time.monotonic() - offer.created > OFFER_TTL_S:
         del _OFFERS[token]
+        _CONFIRMED.discard(token)
         return None
     return offer
 
 
 def peek_offer(token: str, *, chat_id: int) -> Offer | None:
-    """The offer, left in place (the confirm step)."""
+    """The offer, left in place."""
     return _live(token, chat_id)
 
 
-def claim_offer(token: str, *, chat_id: int) -> Offer | None:
-    """Take the offer once. Another chat's tap reads as expired and leaves
-    it in place (callbacks are bound to their chat, #388)."""
+def confirm_offer(token: str, *, chat_id: int) -> Offer | None:
+    """The disclosure step: peek, and note that this offer's disclosure was
+    shown (the only way a later ``claim_offer(confirmed=True)`` succeeds)."""
     offer = _live(token, chat_id)
     if offer is not None:
-        del _OFFERS[token]
+        _CONFIRMED.add(token)
     return offer
+
+
+def is_confirmed(token: str) -> bool:
+    """Whether this offer's disclosure was shown (:func:`confirm_offer`)."""
+    return token in _CONFIRMED
+
+
+def claim_offer(token: str, *, chat_id: int, confirmed: bool = False) -> Offer | None:
+    """Take the offer once. Another chat's tap reads as expired and leaves
+    it in place (callbacks are bound to their chat, #388). ``confirmed``
+    (the ✅ Trust tap) also needs :func:`confirm_offer` first: no one-tap
+    trust."""
+    offer = _live(token, chat_id)
+    if offer is None:
+        return None
+    if confirmed and token not in _CONFIRMED:
+        logger.warning("antigravity.config_trust.unconfirmed", chat_id=chat_id)
+        return None
+    del _OFFERS[token]
+    _CONFIRMED.discard(token)
+    return offer
+
+
+# The newest fingerprint an attended Ask me run computed per (chat, root),
+# for ``/config`` → 🔐 ("changed since"); None when it was untrustable.
+_LATEST: dict[tuple[int, str], str | None] = {}
+_LATEST_MAX = 500
+
+
+def note_latest(chat_id: int, root: str, digest: str | None) -> None:
+    _LATEST.pop((chat_id, root), None)
+    _LATEST[(chat_id, root)] = digest
+    while len(_LATEST) > _LATEST_MAX:
+        del _LATEST[next(iter(_LATEST))]
+
+
+def latest(chat_id: int, root: str) -> tuple[bool, str | None]:
+    """``(known, digest)`` of the newest fingerprint for (chat, root)."""
+    key = (chat_id, root)
+    return key in _LATEST, _LATEST.get(key)
 
 
 def _reset_for_tests() -> None:
     _OFFERS.clear()
+    _CONFIRMED.clear()
+    _LATEST.clear()

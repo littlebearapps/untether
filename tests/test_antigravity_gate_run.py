@@ -921,6 +921,20 @@ def _events(logs: list[dict[str, Any]], name: str) -> list[dict[str, Any]]:
     return [log for log in logs if log["event"] == name]
 
 
+def _assert_offer_button(done: Any) -> None:
+    """A foreign-config refusal with exactly one Trust button whose token is
+    a live offer."""
+    from untether.antigravity import gate_trust
+    from untether.runner import PRESPAWN_BUTTONS_KEY
+
+    assert done.usage[agy.PRESPAWN_BLOCKED_KEY] == agy.GATE_FOREIGN_BLOCK
+    ((button,),) = done.usage[PRESPAWN_BUTTONS_KEY]
+    assert button["text"] == gate_trust.OFFER_BUTTON_TEXT
+    prefix = gate_trust.callback_data("ask", "")
+    assert button["callback_data"].startswith(prefix)
+    assert button["callback_data"][len(prefix) :] in gate_trust._OFFERS
+
+
 @pytest.mark.anyio
 async def test_ask_me_trusted_record_runs_with_bypass(
     project: Path,
@@ -936,7 +950,8 @@ async def test_ask_me_trusted_record_runs_with_bypass(
     runner = _runner()
     events, logs = await _ask_run(runner)
     (done,) = events
-    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    _assert_offer_button(done)
+    assert "tap Trust current config…" in (done.error or "")
     assert not gate_env["record"].exists()
     (offered,) = _events(logs, "antigravity.config_trust_offered")
     assert offered["chat_id"] == CHAT and len(offered["fp"]) == 12
@@ -1010,7 +1025,10 @@ async def test_ask_me_stale_record_refuses_with_new_offer(
     )
     events, logs = await _ask_run(runner)
     (done,) = events
-    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    _assert_offer_button(done)
+    assert (done.error or "").startswith(
+        "The agy config here changed since it was trusted on 1970-01-0"
+    )
     (stale,) = _events(logs, "antigravity.config_trust_stale")
     assert stale["was"] == old.fingerprint.short and stale["now"] != stale["was"]
     (offered,) = _events(logs, "antigravity.config_trust_offered")
@@ -1062,7 +1080,11 @@ async def test_ask_me_offer_only_when_fingerprint_complete(
         monkeypatch.setattr(gate_precheck, "_probe_mcp", failed)
     events, logs = await _ask_run(runner)
     (done,) = events
+    # No button (test_ask_me_foreign_pretooluse_refusal_text_has_no_button);
+    # the text says why the config can't be trusted.
     assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    assert "can't be trusted for Ask me" in (done.error or "")
+    assert "Trust current config" not in (done.error or "")
     assert not _events(logs, "antigravity.config_trust_used")
     assert not _events(logs, "antigravity.config_trust_offered")
     assert gate_trust._OFFERS == {}
@@ -1108,4 +1130,60 @@ async def test_post_run_config_change_revokes_trust(
     assert rows and "Trust for Ask me was removed" in rows[0]
     events, _ = await _ask_run(runner)
     (done,) = events
-    assert done.usage == {agy.PRESPAWN_BLOCKED_KEY: agy.GATE_FOREIGN_BLOCK}
+    _assert_offer_button(done)
+
+
+@pytest.mark.anyio
+async def test_trust_buttons_end_to_end_through_the_trust_file(
+    project: Path,
+    gate_env: dict[str, Path],
+    foreign_stop: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """AG-61 (unit, phase 2): the refusal's button → disclosure → ✅ Trust
+    writes ``antigravity_trust.json`` beside the config, and the runner (its
+    own store instance) runs the next Ask me message trusted. A ✅ Trust
+    tapped without the disclosure first writes nothing."""
+    from types import SimpleNamespace
+
+    from untether.runner import PRESPAWN_BUTTONS_KEY
+    from untether.telegram.commands.antigravity_trust import BACKEND
+
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    config = tmp_path / "untether.toml"
+    runner = AntigravityRunner(antigravity_cmd=str(FAKE_AGY), config_path=config)
+    events, _ = await _ask_run(runner)
+    data = events[-1].usage[PRESPAWN_BUTTONS_KEY][0][0]["callback_data"]
+    token = data.rsplit(":", 1)[1]
+
+    async def tap(action: str) -> list[Any]:
+        edits: list[Any] = []
+
+        async def edit(ref: Any, message: Any) -> Any:
+            edits.append(message)
+            return ref
+
+        await BACKEND.handle(
+            SimpleNamespace(
+                args_text=f"{action}:{token}",
+                message=SimpleNamespace(
+                    channel_id=CHAT, message_id=9, thread_id=None, sender_id=11
+                ),
+                callback_query_id="q",
+                executor=SimpleNamespace(edit=edit),
+                config_path=config,
+            )
+        )
+        return edits
+
+    await tap("yes")  # one tap: refused
+    assert not (tmp_path / "antigravity_trust.json").exists()
+    await tap("ask")
+    (msg,) = await tap("yes")
+    assert "Trusted for Ask me" in msg.text
+    assert (tmp_path / "antigravity_trust.json").exists()
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    assert _events(logs, "antigravity.config_trust_used")
+    assert agy.BYPASS_FLAG in json.loads(gate_env["record"].read_text())["argv"]

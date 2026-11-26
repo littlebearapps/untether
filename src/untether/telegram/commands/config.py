@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from typing import Any, Literal
 
 import anyio
@@ -2227,7 +2228,9 @@ def _chat_project_cwd(ctx: CommandContext) -> Any:
 async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None:
     """REVIEW-2 m3: status only. Installing writes into ``~/.gemini`` and is
     host-wide, so it is a host command, never a button. ``Re-check`` only
-    re-runs agy's own ``-p /hooks`` listing for this chat's project."""
+    re-runs agy's own ``-p /hooks`` listing for this chat's project. #1032:
+    the chat's Ask me trust record for the project, and ``Revoke trust``
+    (``rv``, admin-gated) to remove it."""
     from ...antigravity import gate_plugin, gate_precheck
 
     cwd = _chat_project_cwd(ctx)
@@ -2248,6 +2251,31 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
                     chat_id=ctx.message.channel_id,
                     sender_id=ctx.message.sender_id,
                 )
+
+    from ...antigravity import gate_trust
+    from . import antigravity_trust
+
+    chat_id = ctx.message.channel_id
+    root = antigravity_trust.record_root(cwd)
+    if action == "rv":
+        revoked = (
+            antigravity_trust.revoke(
+                ctx.config_path, chat_id, root, sender_id=ctx.message.sender_id
+            )
+            if root is not None
+            else None
+        )
+        if revoked is None:
+            note = "Nothing is trusted for this chat's project."
+        elif revoked:
+            note = "Trust removed. The next Ask me message here asks again."
+        else:
+            note = (
+                "Trust removed, but Untether couldn't save that, so it may come"
+                " back after a restart. Check the folder beside untether.toml."
+            )
+    store = antigravity_trust.trust_store(ctx.config_path)
+    record = store.get(chat_id, root) if store is not None and root else None
 
     install = await anyio.to_thread.run_sync(gate_plugin.inspect_install)
     latest = gate_precheck.latest(cwd)
@@ -2288,6 +2316,21 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
     if latest is not None and latest.foreign_sources:
         shown = ", ".join(latest.foreign_sources[:5])
         lines.append(f"Other agy hooks here: <code>{html.escape(shown)}</code>")
+    if record is not None and root is not None:
+        # #1032: this chat's Ask me trust record for the project.
+        items = [*record.paths, *record.groups]
+        shown = ", ".join(items[:5]) + (
+            f" and {len(items) - 5} more" if len(items) > 5 else ""
+        )
+        day = time.strftime("%Y-%m-%d", time.localtime(record.at))
+        line = (
+            f"Trusted agy config for Ask me: <code>{html.escape(shown)}</code>"
+            f" · digest <code>{record.fp[:12]}</code> · trusted {day}"
+        )
+        known, now = gate_trust.latest(chat_id, root)
+        if known and now != record.fp:
+            line += " <i>(changed since, so Ask me asks again)</i>"
+        lines.append(line)
     if note is not None:
         lines += ["", html.escape(note)]
     lines += [
@@ -2307,6 +2350,10 @@ async def _page_agy_gate(ctx: CommandContext, action: str | None = None) -> None
             {"text": "← Back", "callback_data": "config:home"},
         ]
     ]
+    if record is not None:
+        buttons.insert(
+            0, [{"text": "🔒 Revoke trust", "callback_data": "config:gt:rv"}]
+        )
     await _respond(ctx, "\n".join(lines), buttons)
 
 
@@ -3365,8 +3412,9 @@ _MUTATING_ACTIONS: dict[str, frozenset[str]] = {
     ),
     "rl": _ON_OFF_CLR,
     "ab": frozenset(),
-    # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS.
-    "gt": frozenset(),
+    # #980: read-only status; Re-check (`rc`) is in _OPEN_ACTIONS. #1032:
+    # Revoke trust (`rv`) removes this chat's Ask me trust record.
+    "gt": frozenset({"rv"}),
     "loop": _ON_OFF_CLR,
     "ws": frozenset({"def", "live", "off"}),  # #423
 }

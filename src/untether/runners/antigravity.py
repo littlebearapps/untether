@@ -69,6 +69,7 @@ from ..model import (
 )
 from ..runner import (
     PRESPAWN_BLOCKED_KEY,
+    PRESPAWN_BUTTONS_KEY,
     RETIRED_CARDS_KEY,
     REVIEW_CARD_KEY,
     JsonlSubprocessRunner,
@@ -759,14 +760,56 @@ def gate_self_protect_message(path: str) -> str:
     )
 
 
-def gate_foreign_message(paths: list[str]) -> str:
-    return (
+_CANT_TRUST = "so this config can't be trusted for Ask me"
+# #1032: why a foreign set can't be trusted (``gate_trust`` reasons).
+_UNTRUSTABLE_TEXT = {
+    "foreign_pretooluse": "agy also loads another PreToolUse hook here "
+    "(`{detail}`), which runs before or after Untether's approval check and "
+    "can approve or change a tool call, " + _CANT_TRUST + ".",
+    "agent_hooks": "A custom agent here (`{detail}`) declares its own hooks, "
+    "which agy doesn't list, " + _CANT_TRUST + ".",
+    "agent_unreadable": "Untether can't read a custom agent here "
+    "(`{detail}`), " + _CANT_TRUST + ".",
+    "mcp_unknown": "Untether couldn't list agy's MCP servers (`agy mcp list` "
+    "failed), " + _CANT_TRUST + " right now. Try again later.",
+    "version_unknown": "Untether couldn't read agy's version, "
+    + _CANT_TRUST
+    + " right now. Try again later.",
+    "scan_incomplete": "Untether couldn't check all of this project's agy "
+    "config, " + _CANT_TRUST + ".",
+}
+
+
+def gate_foreign_message(
+    paths: list[str],
+    *,
+    offer: bool = False,
+    stale_at: float | None = None,
+    untrustable: tuple[str, str] | None = None,
+) -> str:
+    """Ask me's foreign-config refusal; with #1032's offer (the button is
+    added by the runner), the date a now-changed trust record was made, or
+    why the set can't be trusted."""
+    text = (
         "Ask me isn't available in this project: agy loads hooks, plugins, "
         "agents or MCP servers here that Untether doesn't manage "
         f"({_paths_text(paths)}), and they run their own commands without "
-        "asking in Telegram. " + _ASK_ELSEWHERE + " Remove them (or move them "
-        "out of the project) to use Ask me."
+        "asking in Telegram. " + _ASK_ELSEWHERE
     )
+    if offer:
+        text += (
+            " Remove them, or tap Trust current config… if you set them up yourself."
+        )
+    else:
+        text += " Remove them (or move them out of the project) to use Ask me."
+    if untrustable is not None:
+        why = _UNTRUSTABLE_TEXT.get(untrustable[0])
+        if why is not None:
+            text += " " + why.format(detail=untrustable[1])
+    if stale_at is not None:
+        day = time.strftime("%Y-%m-%d", time.localtime(stale_at))
+        text = f"The agy config here changed since it was trusted on {day}. " + text
+    return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -783,6 +826,10 @@ class GateFacts:
     # #1032: the one-shot offer token a refusal registered (complete
     # fingerprint, attended); None otherwise.
     trust_offer: str | None = None
+    # #1032: when this chat's now-outdated record was made (epoch s), and
+    # why the set can't be trusted ``(reason, detail)``; refusal text only.
+    trust_stale_at: float | None = None
+    trust_untrustable: tuple[str, str] | None = None
     listening: bool = False  # this run's socket is bound
 
 
@@ -796,6 +843,7 @@ class ModeDecision:
     no_shell_agent: bool = True  # --agent=untether-workspace (when it can)
     refusal: str | None = None  # refuse before spawn with this text
     block: str | None = None  # its PRESPAWN_BLOCKED_KEY value
+    trust_offer: str | None = None  # #1032: the refusal's Trust button token
 
 
 def decide_antigravity_mode(mode: str, gate: GateFacts | None = None) -> ModeDecision:
@@ -842,8 +890,14 @@ def decide_antigravity_mode(mode: str, gate: GateFacts | None = None) -> ModeDec
     if gate.foreign and not gate.foreign_trusted:
         return replace(
             refused,
-            refusal=gate_foreign_message(list(gate.foreign)),
+            refusal=gate_foreign_message(
+                list(gate.foreign),
+                offer=gate.trust_offer is not None,
+                stale_at=gate.trust_stale_at,
+                untrustable=gate.trust_untrustable,
+            ),
             block=GATE_FOREIGN_BLOCK,
+            trust_offer=gate.trust_offer,
         )
     if not gate.listening:
         return replace(
@@ -1935,10 +1989,22 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             mode=decision.mode,
             reason=decision.block,
         )
+        usage: dict[str, Any] = {PRESPAWN_BLOCKED_KEY: decision.block}
+        if decision.trust_offer is not None:
+            from ..antigravity import gate_trust
+
+            usage[PRESPAWN_BUTTONS_KEY] = [
+                [
+                    {
+                        "text": gate_trust.OFFER_BUTTON_TEXT,
+                        "callback_data": gate_trust.callback_data(
+                            "ask", decision.trust_offer
+                        ),
+                    }
+                ]
+            ]
         return EventFactory(ENGINE).completed_error(
-            error=decision.refusal,
-            resume=resume,
-            usage={PRESPAWN_BLOCKED_KEY: decision.block},
+            error=decision.refusal, resume=resume, usage=usage
         )
 
     def _seen(self) -> SeenConfigStore:
@@ -2291,17 +2357,19 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 problem=f"Untether couldn't check this project's agy config ({why})",
             )
         foreign = await gate_precheck.foreign_config(self, result, pre.scan)
-        trusted, offer, untrustable = False, None, None
+        trust: dict[str, Any] = {}
         if foreign and result.self_protect is None:
-            trusted, offer, untrustable = await self._trust_check(pre, result, foreign)
-        if foreign and not trusted:
+            trust = await self._trust_check(pre, result, foreign)
+        if foreign and not trust.get("foreign_trusted"):
+            why = trust.get("trust_untrustable")
             logger.warning(
                 "antigravity.gate.precheck_failed",
                 reason="foreign_config",
                 paths=list(foreign)[:20],
                 cwd=str(pre.cwd),
-                trust=untrustable,
+                trust=why[0] if why else trust.get("skipped"),
             )
+        trust.pop("skipped", None)
         if result.self_protect is not None:
             logger.warning(
                 "antigravity.gate.precheck_failed",
@@ -2313,24 +2381,24 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             installed=True,
             self_protect=result.self_protect,
             foreign=foreign,
-            foreign_trusted=trusted,
-            trust_offer=offer,
             listening=True,
+            **trust,
         )
 
     async def _trust_check(
         self, pre: _RunPrecheck, result: Any, foreign: tuple[str, ...]
-    ) -> tuple[bool, str | None, str | None]:
-        """#1032: ``(trusted, offer token, untrustable reason)`` for an Ask
-        me run refused only for foreign config. Attended runs in a known chat
-        only: a cron or webhook never uses a record or gets an offer (an
-        ``/at`` or loop fire counts as attended, D6)."""
+    ) -> dict[str, Any]:
+        """#1032: the trust fields of :class:`GateFacts` for an Ask me run
+        refused only for foreign config (plus ``skipped`` for the log).
+        Attended runs in a known chat only: a cron or webhook never uses a
+        record or gets an offer (an ``/at`` or loop fire counts as attended,
+        D6)."""
         from ..antigravity import gate_precheck, gate_trust
 
         options = get_run_options()
         chat_id = get_run_channel_id()
         if chat_id is None or (options is not None and options.unattended_trigger):
-            return False, None, "unattended"
+            return {"skipped": "unattended"}
         assert pre.scan is not None  # _ask_facts refused an unfinished scan
         agent = await anyio.to_thread.run_sync(gate_trust.agent_problem, pre.scan)
         mcp: str | None = gate_precheck.MCP_NONE
@@ -2346,6 +2414,9 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             agent_problem=agent,
         )
         root = os.path.realpath(pre.scan.root)
+        gate_trust.note_latest(
+            chat_id, root, fp.digest if isinstance(fp, gate_trust.Fingerprint) else None
+        )
         record = self._trust().get(chat_id, root)
         if (
             isinstance(fp, gate_trust.Fingerprint)
@@ -2360,9 +2431,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             pre.label_suffix += " · trusted agy config"
             pre.trusted = (chat_id, root, fp.short)
-            return True, None, None
+            return {"foreign_trusted": True}
         untrustable = fp.reason if isinstance(fp, gate_trust.Untrustable) else None
+        out: dict[str, Any] = {}
         if record is not None:
+            out["trust_stale_at"] = record.at
             logger.warning(
                 "antigravity.config_trust_stale",
                 chat_id=chat_id,
@@ -2372,7 +2445,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 untrustable=untrustable,
             )
         if isinstance(fp, gate_trust.Untrustable):
-            return False, None, fp.reason
+            out["trust_untrustable"] = (fp.reason, fp.detail)
+            return out
         token = gate_trust.register_offer(chat_id, root, fp)
         logger.info(
             "antigravity.config_trust_offered",
@@ -2382,7 +2456,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             paths=list(fp.paths)[:20],
             groups=list(fp.groups)[:20],
         )
-        return False, token, None
+        out["trust_offer"] = token
+        return out
 
     def _revoke_trust(self, pre: _RunPrecheck, reason: str) -> bool:
         """D11: drop the record a trusted run used. True when one was

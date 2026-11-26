@@ -362,6 +362,89 @@ async def test_config_gt_page_read_only_shows_cli_commands(tmp_path: Path) -> No
     assert not gate_plugin.plugin_dir().exists()
 
 
+def _trust_record(project: Path, tmp_path: Path, fp: str = "cd" * 32) -> str:
+    import os
+
+    from untether.utils.antigravity_state import TRUST_FILENAME, TrustRecord, TrustStore
+
+    root = os.path.realpath(project)
+    record = TrustRecord(
+        fp=fp,
+        paths=(".agents/hooks.json",),
+        groups=("lint (/p/.agents/hooks.json)",),
+        agy="1.5.18",
+        at=1764115200.0,
+        by=11,
+    )
+    assert TrustStore(tmp_path / TRUST_FILENAME).set(555, root, record)
+    return root
+
+
+@pytest.mark.anyio
+async def test_config_gt_shows_trust_record_and_revoke(tmp_path: Path) -> None:
+    """#1032: the record for this chat's project, with a revoke button that
+    is a mutating (admin-gated) action."""
+    from untether.antigravity import gate_trust
+    from untether.telegram.commands.config import ConfigCommand, classify_config_action
+
+    gate_trust._reset_for_tests()
+    project = tmp_path / "proj"
+    project.mkdir()
+    _trust_record(project, tmp_path)
+    ctx = _config_ctx("gt", tmp_path, project)
+    await ConfigCommand().handle(ctx)
+    text, data = _page(ctx)
+    assert "Trusted agy config" in text
+    assert ".agents/hooks.json" in text and "lint" in text
+    assert "cdcdcdcdcdcd" in text and "2025-11-26" in text
+    assert "changed since" not in text
+    assert data == ["config:gt:rv", "config:gt:rc", "config:home"]
+    assert classify_config_action("gt:rv") == "mutating"
+
+
+@pytest.mark.anyio
+async def test_config_gt_marks_record_changed_since(tmp_path: Path) -> None:
+    import os
+
+    from untether.antigravity import gate_trust
+    from untether.telegram.commands.config import ConfigCommand
+
+    gate_trust._reset_for_tests()
+    project = tmp_path / "proj"
+    project.mkdir()
+    root = _trust_record(project, tmp_path)
+    for latest, changed in (("cd" * 32, False), ("ef" * 32, True), (None, True)):
+        gate_trust.note_latest(555, root, latest)
+        ctx = _config_ctx("gt", tmp_path, project)
+        await ConfigCommand().handle(ctx)
+        text, _ = _page(ctx)
+        assert ("changed since, so Ask me asks again" in text) is changed
+    assert os.path.realpath(project) == root
+
+
+@pytest.mark.anyio
+async def test_config_gt_revoke_clears_record_and_logs(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    from untether.telegram.commands.config import ConfigCommand
+    from untether.utils.antigravity_state import TRUST_FILENAME, TrustStore
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    root = _trust_record(project, tmp_path)
+    ctx = _config_ctx("gt:rv", tmp_path, project)
+    ctx.message.sender_id = 11
+    with capture_logs() as logs:
+        await ConfigCommand().handle(ctx)
+    text, data = _page(ctx)
+    assert TrustStore(tmp_path / TRUST_FILENAME).get(555, root) is None
+    assert "Trust removed" in text and "Trusted agy config" not in text
+    assert data == ["config:gt:rc", "config:home"]
+    (log,) = [r for r in logs if r["event"] == "antigravity.config_trust_revoked"]
+    assert log["reason"] == "user" and log["sender_id"] == 11
+    assert log["chat_id"] == 555
+
+
 @pytest.mark.anyio
 async def test_config_gt_recheck_runs_hooks_listing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
