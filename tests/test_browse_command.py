@@ -42,6 +42,16 @@ def _link(link: Path, target: Path | str) -> None:
         pytest.skip("symlinks not supported")
 
 
+def _pre_entities(msg) -> list[dict]:
+    return [e for e in msg.extra.get("entities") or [] if e["type"] == "pre"]
+
+
+def _entity_text(msg, entity) -> str:
+    raw = msg.text.encode("utf-16-le")
+    start, end = entity["offset"] * 2, (entity["offset"] + entity["length"]) * 2
+    return raw[start:end].decode("utf-16-le")
+
+
 def _make_ctx(args_text: str, *, chat_id: int | str = CHAT, globs=None):
     """Build a minimal CommandContext-like object for testing."""
     ctx = MagicMock()
@@ -338,7 +348,7 @@ class TestBrowseCommandHandle:
         sent_msg = ctx.executor.send.call_args[0][0]
         assert "Hello World" in sent_msg.text
         # Language detection: .md -> markdown
-        assert "```markdown" in sent_msg.text
+        assert _pre_entities(sent_msg)[0]["language"] == "markdown"
         # Back button present
         keyboard = sent_msg.extra["reply_markup"]["inline_keyboard"]
         assert any("Back" in btn["text"] for row in keyboard for btn in row)
@@ -440,7 +450,7 @@ class TestBrowseCommandHandle:
         ):
             await cmd.handle(ctx)
         sent_msg = ctx.executor.send.call_args[0][0]
-        assert "```python" in sent_msg.text
+        assert _pre_entities(sent_msg)[0]["language"] == "python"
 
     @pytest.mark.anyio
     async def test_file_preview_no_lang_for_unknown_ext(self, cmd, tmp_path):
@@ -453,7 +463,69 @@ class TestBrowseCommandHandle:
             await cmd.handle(ctx)
         sent_msg = ctx.executor.send.call_args[0][0]
         # Unknown extension -> bare code block
-        assert "```\n" in sent_msg.text
+        (pre,) = _pre_entities(sent_msg)
+        assert "language" not in pre
+        assert "```" not in sent_msg.text
+
+    async def _preview(self, cmd, root, filepath):
+        pid = _register_path(CHAT, str(filepath))
+        ctx = self._make_ctx(f"f:{pid}")
+        with patch(
+            "untether.telegram.commands.browse._get_project_root", return_value=root
+        ):
+            assert await cmd.handle(ctx) is None
+        return ctx.executor.send.call_args[0][0]
+
+    @pytest.mark.anyio
+    async def test_file_preview_is_one_pre_entity_with_inner_fence(self, cmd, tmp_path):
+        """#1409: an inner ```sh fence stays inside ONE pre block."""
+        content = "# Title\n\n```sh\nuv run pytest\n```\n\nMore text"
+        f = tmp_path / "README.md"
+        f.write_text(content)
+        msg = await self._preview(cmd, tmp_path, f)
+        (pre,) = _pre_entities(msg)
+        assert pre["language"] == "markdown"
+        assert _entity_text(msg, pre) == content
+        # No stray outer fence line outside the block
+        assert not msg.text.startswith("```")
+        assert "```markdown" not in msg.text
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "intro\n~~~\ntilde block\n~~~\nend",
+            "intro\n````md\n```sh\nnested\n```\n````\nend",
+        ],
+    )
+    async def test_file_preview_tilde_and_long_fences(self, cmd, tmp_path, content):
+        f = tmp_path / "notes.md"
+        f.write_text(content)
+        msg = await self._preview(cmd, tmp_path, f)
+        (pre,) = _pre_entities(msg)
+        assert pre["language"] == "markdown"
+        assert _entity_text(msg, pre) == content
+
+    @pytest.mark.anyio
+    async def test_file_preview_long_path_stays_under_limit(self, cmd, tmp_path):
+        d = tmp_path
+        for i in range(10):
+            d = d / (f"{i}" * 200)
+        d.mkdir(parents=True)
+        f = d / "__init__.py"
+        f.write_text("x = 1\n" * 400)
+        msg = await self._preview(cmd, tmp_path, f)
+        assert len(str(f.relative_to(tmp_path))) > 2000
+        assert len(msg.text.encode("utf-16-le")) // 2 <= 4096
+        (pre,) = _pre_entities(msg)
+        assert pre["language"] == "python"
+        utf16_len = len(msg.text.encode("utf-16-le")) // 2
+        for e in msg.extra["entities"]:
+            assert e["offset"] >= 0
+            assert e["offset"] + e["length"] <= utf16_len
+        # Path keeps its tail (the file name) and isn't rendered bold
+        assert "…" in msg.text and "__init__.py" in msg.text
+        assert not any(e["type"] == "bold" for e in msg.extra["entities"])
 
     @pytest.mark.anyio
     async def test_file_preview_back_button_points_to_parent(self, cmd, tmp_path):

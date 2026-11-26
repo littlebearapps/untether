@@ -9,10 +9,12 @@ from typing import NamedTuple
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...context import RunContext
 from ...logging import get_logger
+from ...markdown import backtick_fence, format_changed_file_path
 from ...settings import TelegramFilesSettings
 from ...transport import RenderedMessage
 from ...utils.paths import get_run_base_dir
 from ..files import PathAccess, check_path_access
+from ..render import render_markdown
 
 logger = get_logger(__name__)
 
@@ -487,13 +489,15 @@ class BrowseCommand:
             )
             return CommandResult(text="Path outside project.", notify=True)
 
-        rel = filepath.relative_to(root)
         preview = _read_file_preview(filepath)
         lang = _EXT_LANG.get(filepath.suffix.lower(), "")
-        text = f"📄 {rel}\n\n```{lang}\n{preview}\n```"
-        # Truncate to Telegram limit
-        if len(text) > 3500:
-            text = text[:3500] + "\n…(truncated)```"
+        # The fence outruns any backtick run in the file, so an inner fence
+        # can't close the block (#1409); the path keeps its last 200 chars.
+        fence = backtick_fence(preview, minimum=3)
+        shown = format_changed_file_path(str(filepath), base_dir=root, width=200)
+        text, entities = render_markdown(
+            f"📄 {shown}\n\n{fence}{lang}\n{preview}\n{fence}"
+        )
 
         # Back button to parent directory
         parent_pid = _register_path(ctx.message.channel_id, str(filepath.parent))
@@ -501,7 +505,7 @@ class BrowseCommand:
 
         msg = RenderedMessage(
             text=text,
-            extra={"reply_markup": {"inline_keyboard": buttons}},
+            extra={"entities": entities, "reply_markup": {"inline_keyboard": buttons}},
         )
         await ctx.executor.send(msg, reply_to=ctx.message, notify=True)
         return None  # Already sent
