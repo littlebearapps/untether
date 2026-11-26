@@ -281,6 +281,9 @@ OTHER_THREAD = "01a1f1dc-09ac-7ec3-851e-ef00717cb6a2"
 _FAKE_APP_SERVER = r"""
 import json, os, sys, time
 SC = json.load(open(SC_PATH))
+if SC.get("ignore_term"):
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 CUR = {}
 log = open(LOG_PATH, "a")
 with open(ARGV_PATH, "w") as fh:

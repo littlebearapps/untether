@@ -747,3 +747,63 @@ async def test_an_answer_naming_another_turn_re_labels_the_attribution() -> None
         for e in logs
         if e["event"] == "codex.app_server.followup_turn_mismatch"
     ] == ["turn-b"]
+
+
+@pytest.mark.anyio
+async def test_a_process_ignoring_sigterm_is_killed_before_the_thread_is_released(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H3 (per-run too): stdin closed, the exit grace ran out, SIGTERM
+    ignored. The thread is released only once the process is gone (SIGKILL,
+    reaped), never while it can still serve the thread."""
+    fake = Fake(tmp_path, linger=True, ignore_term=True)
+    runner = _rt._runner(fake, exit_grace_s=0.3)
+    runner._KILL_ESCALATION_S = 0.3
+    alive_at_release: list[bool] = []
+    release = gate._release_thread
+
+    def spy(state: Any) -> None:
+        alive_at_release.append(state.proc.returncode is None)
+        release(state)
+
+    monkeypatch.setattr(gate, "_release_thread", spy)
+    with capture_logs() as logs:
+        events = await _rt._run(runner, resume=RESUME)
+    assert _rt._completed(events).ok
+    assert alive_at_release == [False]
+    assert gate._RUNS_BY_THREAD == {}
+    assert [
+        e["event"] for e in logs if e["event"].startswith("codex.app_server.exit")
+    ] == [
+        "codex.app_server.exit_timeout",
+        "codex.app_server.exit_killed",
+    ]
+
+
+@pytest.mark.anyio
+async def test_an_exit_that_cannot_be_confirmed_keeps_the_thread_owned(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H3, fail closed: if the process can't be confirmed gone, the
+    thread stays owned (closing, so no steer) and a warning says so."""
+
+    async def not_gone(self: Any, proc: Any) -> bool:
+        await proc.stdin.aclose()  # it does exit; we just couldn't confirm it
+        return False
+
+    monkeypatch.setattr(gate.CodexAppServerRunner, "_close_process", not_gone)
+    fake = Fake(tmp_path)
+    with capture_logs() as logs:
+        await _rt._run(_rt._runner(fake), resume=RESUME)
+    state = gate._RUNS_BY_THREAD[THREAD]
+    assert state.closing is True and gate.STEER_BACKEND.get(THREAD) is None
+    assert [
+        e["thread_id"] for e in logs if e["event"] == "codex.app_server.thread_kept"
+    ] == [THREAD]
+    gate._RUNS_BY_THREAD.clear()

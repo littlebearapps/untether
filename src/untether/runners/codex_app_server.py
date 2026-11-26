@@ -57,7 +57,7 @@ from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
 from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
-from ..utils.subprocess import terminate_process
+from ..utils.subprocess import kill_process, terminate_process
 from . import codex_approvals as approvals
 from . import codex_reads
 from .codex import (
@@ -958,8 +958,18 @@ class CodexAppServerRunner(CodexRunner):
             # gone (bounded; SIGTERM after the grace), so a run resuming it
             # never meets a process that still holds it.
             with anyio.CancelScope(shield=True):
-                await self._close_process(state.proc)
-            _release_thread(state)
+                gone = await self._close_process(state.proc)
+            if gone:
+                _release_thread(state)
+            else:
+                # Review H3: fail closed. The thread stays owned (closing: no
+                # steer, no follow-up) rather than let another run resume it
+                # while this process may still serve it.
+                logger.warning(
+                    "codex.app_server.thread_kept",
+                    thread_id=state.thread_id,
+                    pid=getattr(state.proc, "pid", None),
+                )
 
     @staticmethod
     def _end_run(state: AppServerRunState) -> None:
@@ -1073,16 +1083,28 @@ class CodexAppServerRunner(CodexRunner):
             return turn.get("id") if isinstance(turn, dict) else None
         return None
 
-    async def _close_process(self, proc: Any) -> None:
-        """Close stdin (the app-server exits in ~0.1 s), then a bounded wait:
-        the base's own ``proc.wait()`` has no bound."""
+    async def _close_process(self, proc: Any) -> bool:
+        """Close stdin (the app-server exits in ~0.1 s), then bounded waits:
+        the exit grace, SIGTERM and ``_KILL_ESCALATION_S``, then SIGKILL and
+        the same again to reap it. True once the process is confirmed gone
+        (review H3: only then may its thread be released)."""
         with contextlib.suppress(Exception):
             await proc.stdin.aclose()
-        with anyio.move_on_after(self.exit_grace_s):
-            await proc.wait()
-            return
+        if await self._exited(proc, self.exit_grace_s):
+            return True
         logger.warning("codex.app_server.exit_timeout", pid=proc.pid)
         terminate_process(proc)
+        if await self._exited(proc, self._KILL_ESCALATION_S):
+            return True
+        logger.warning("codex.app_server.exit_killed", pid=proc.pid)
+        kill_process(proc)
+        return await self._exited(proc, self._KILL_ESCALATION_S)
+
+    @staticmethod
+    async def _exited(proc: Any, timeout: float) -> bool:  # noqa: ASYNC109
+        with anyio.move_on_after(timeout):
+            await proc.wait()
+        return proc.returncode is not None
 
     # --- translation ---------------------------------------------------------
 
