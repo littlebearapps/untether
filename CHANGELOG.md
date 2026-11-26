@@ -34,6 +34,7 @@
 
 ### fixes
 
+- **security(codex):** on app-server, a git repo nested inside a folder listed in Codex's `[projects]` no longer gets a writable sandbox (which made Codex save it as trusted). Untether now follows Codex's own lookup: an entry for the working folder, else for its git repo root, and no parent folders. **Behaviour change:** Full auto, Ask me and Auto-review in a nested repo, a linked worktree, a submodule or a `--separate-git-dir` checkout, and in a folder whose own entry has no `trust_level`, now run read-only with the ⚠️ row until you add `[projects."<repo root>"] trust_level = "trusted"`; subfolders of a listed repo are unchanged [#1408](https://github.com/littlebearapps/untether/issues/1408)
 - **fix:** a message starting with `@someone` no longer creates a branch or worktree; a username-like `@name` is a branch only after `/<project>` or when that branch already exists [#1383](https://github.com/littlebearapps/untether/issues/1383)
 - **fix:** a prompt blocked by the pre-spawn RAM guard is held for up to 5 minutes and starts by itself when memory frees (`/cancel` still works); on timeout the prompt is quoted back so a voice transcript isn't lost [#1388](https://github.com/littlebearapps/untether/issues/1388)
 - **fix:** a quarantined settings file now sends the admins a DM with the backup path and a restore command, instead of silently resetting every chat's permission mode [#1381](https://github.com/littlebearapps/untether/issues/1381)

@@ -11,6 +11,7 @@ receives, and follows a per-test scenario.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -605,6 +606,8 @@ async def test_safe_and_unknown_modes_send_read_only_without_config_read(
 async def test_full_auto_omits_sandbox_in_a_project_codex_knows(
     tmp_path: Path, project: Path, gate_calls: list[str], options: Any
 ) -> None:
+    # #1408: the parent's entry covers project only as its git repo root.
+    _git("init", cwd=project.parent)
     config = {
         "sandbox_mode": "workspace-write",
         "projects": {str(project.parent): {"trust_level": "untrusted"}},
@@ -643,13 +646,205 @@ async def test_full_auto_read_only_quietly_when_codex_default_is_read_only(
     assert not any(getattr(e, "action", None) for e in events)
 
 
-def test_has_trust_entry_matches_cwd_or_a_parent() -> None:
-    projects = {"/srv/repo": {"trust_level": "trusted"}}
-    assert gate.has_trust_entry(projects, "/srv/repo")
-    assert gate.has_trust_entry(projects, "/srv/repo/sub/dir")
-    assert not gate.has_trust_entry(projects, "/srv/other")
-    assert not gate.has_trust_entry(None, "/srv/repo")
-    assert not gate.has_trust_entry({"/srv/repo": "x"}, "/srv/repo")
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@contextlib.contextmanager
+def _cwd(path: Path):
+    token = set_run_base_dir(path)
+    try:
+        yield
+    finally:
+        reset_run_base_dir(token)
+
+
+def _trust_rows(events: list[Any]) -> list[str]:
+    return [e.action.id for e in events if isinstance(e, ActionEvent)]
+
+
+def test_selected_entry_follows_codex_order(tmp_path: Path) -> None:
+    # #1408: Codex's ProjectTrustLookup (0.171.0): canonical cwd, cwd,
+    # canonical repo root, repo root; first key present wins; no parent walk.
+    root = {"trust_level": "trusted"}
+    projects = {"/srv/repo": root}
+    select = gate.selected_project_entry
+    assert select(projects, "/srv/repo/sub", "/srv/repo") is root
+    assert select(projects, "/srv/repo/nested", "/srv/repo/nested") is None
+    assert select(projects, "/srv/repo/sub", None) is None
+    assert select(None, "/srv/repo", "/srv/repo") is None
+    bare: dict = {}
+    shadowed = {**projects, "/srv/repo/sub": bare}
+    assert select(shadowed, "/srv/repo/sub", "/srv/repo") is bare
+    real = (tmp_path / "real").resolve()
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    canonical, raw = {"trust_level": "trusted"}, {"trust_level": "untrusted"}
+    both = {str(link): raw, str(real): canonical}
+    assert select(both, str(link), None) is canonical
+
+
+_ASK = EngineRunOptions(permission_mode="ask")
+_WRITABLE_TIERS = [
+    pytest.param(None, "workspace-write", id="full_auto"),
+    pytest.param(None, "danger-full-access", id="full_access"),
+    pytest.param("ask", None, id="ask"),
+    pytest.param("review", None, id="review"),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("mode", "sandbox_mode"), _WRITABLE_TIERS)
+async def test_writable_tier_in_nested_repo_under_trusted_parent_runs_read_only(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    mode: str | None,
+    sandbox_mode: str | None,
+) -> None:
+    # #1408 / CX-41: Codex has no entry for the nested repo and would save
+    # it as trusted on a writable sandbox.
+    _git("init", cwd=tmp_path)
+    _git("init", cwd=project)
+    config: dict[str, Any] = {"projects": {str(tmp_path): {"trust_level": "trusted"}}}
+    if sandbox_mode:
+        config["sandbox_mode"] = sandbox_mode
+    fake = Fake(tmp_path, config=config)
+    with capture_logs() as logs:
+        events = await _run(
+            _runner(fake), options=EngineRunOptions(permission_mode=mode)
+        )
+    assert _completed(events).ok
+    assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+    assert _trust_rows(events) == ["codex.untrusted_read_only"]
+    logged = [e for e in logs if e["event"] == "codex.app_server.untrusted_read_only"]
+    assert logged[0]["repo_root"] == str(project)
+
+
+@pytest.mark.anyio
+async def test_writable_tier_in_subdir_of_trusted_repo_keeps_workspace_write(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    _git("init", cwd=project)
+    sub = project / "sub"
+    sub.mkdir()
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    fake = Fake(tmp_path, config=trusted)
+    with _cwd(sub):
+        events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "workspace-write"
+    assert _trust_rows(events) == []
+
+
+@pytest.mark.anyio
+async def test_cwd_entry_without_trust_level_shadows_trusted_root_runs_read_only(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # Codex selects the cwd's bare entry first, then writes trust over it.
+    _git("init", cwd=project)
+    sub = project / "sub"
+    sub.mkdir()
+    projects = {str(project): {"trust_level": "trusted"}, str(sub): {}}
+    fake = Fake(tmp_path, config={"projects": projects})
+    with _cwd(sub):
+        events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+    assert _trust_rows(events) == ["codex.untrusted_read_only"]
+
+
+@pytest.mark.anyio
+async def test_explicit_untrusted_cwd_keeps_writable_sandbox_without_trust_write(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # Codex never writes over an explicit trust_level, trusted or not.
+    config = {"projects": {str(project): {"trust_level": "untrusted"}}}
+    fake = Fake(tmp_path, config=config)
+    events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "workspace-write"
+    assert _trust_rows(events) == []
+
+
+@pytest.mark.anyio
+async def test_linked_worktree_fails_closed(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # #1408 decision: linked worktrees stay read-only until #1413.
+    _git("init", cwd=project)
+    _git("commit", "--allow-empty", "-q", "-m", "x", cwd=project)
+    worktree = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(worktree), cwd=project)
+    assert gate.git_repo_root(project) == str(project)
+    assert gate.git_repo_root(worktree) is None
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    fake = Fake(tmp_path, config=trusted)
+    with _cwd(worktree):
+        events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+    assert _trust_rows(events) == ["codex.untrusted_read_only"]
+
+
+def test_git_repo_root_mirrors_codex_head_rule(project: Path) -> None:
+    # Codex's trust walk (trust.rs resolve_root) stops at a `.git` dir with
+    # HEAD even if git itself rejects the repo, and skips one without HEAD.
+    _git("init", cwd=project)
+    bogus = project / "bogus"
+    (bogus / ".git").mkdir(parents=True)
+    (bogus / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    headless = project / "headless"
+    (headless / ".git").mkdir(parents=True)
+    assert gate.git_repo_root(bogus) == str(bogus)
+    assert gate.git_repo_root(headless) == str(project)
+    (project / "linked").mkdir()
+    (project / "linked" / ".git").symlink_to(project / ".git")
+    assert gate.git_repo_root(project / "linked") is None
+
+
+@pytest.mark.anyio
+async def test_invalid_nested_repo_with_head_runs_read_only(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # Codex's review (#1408): git ignores a nested `.git` holding only HEAD
+    # and finds the trusted parent, but Codex picks the nested root.
+    _git("init", cwd=project)
+    nested = project / "nested"
+    (nested / ".git").mkdir(parents=True)
+    (nested / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    fake = Fake(tmp_path, config=trusted)
+    with _cwd(nested):
+        events = await _run(_runner(fake), options=_ASK)
+    assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+    assert _trust_rows(events) == ["codex.untrusted_read_only"]
+
+
+@pytest.mark.anyio
+async def test_separate_git_dir_fails_closed(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # `.git` as a file (--separate-git-dir, or a forged gitdir: pointer at a
+    # trusted repo) never yields a repo root.
+    _git("init", cwd=project)
+    split = tmp_path / "split"
+    meta = f"--separate-git-dir={project / 'meta'}"
+    _git("init", "-q", meta, str(split), cwd=tmp_path)
+    forged = tmp_path / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {project / '.git'}\n")
+    assert gate.git_repo_root(split) is None
+    assert gate.git_repo_root(forged) is None
+    trusted = {"projects": {str(project): {"trust_level": "trusted"}}}
+    for cwd in (split, forged):
+        fake = Fake(tmp_path / cwd.name, config=trusted)
+        with _cwd(cwd):
+            events = await _run(_runner(fake), options=_ASK)
+        assert fake.requests("thread/start")[0]["sandbox"] == "read-only"
+        assert _trust_rows(events) == ["codex.untrusted_read_only"]
 
 
 @pytest.mark.parametrize(

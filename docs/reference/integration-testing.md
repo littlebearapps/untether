@@ -290,7 +290,7 @@ Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex w
 | CX-38 | **Session approval** | Ask before writes; `create a.txt, then append to a.txt`; tap 🔁 Allow for session on the first | Second write doesn't prompt (same run) |
 | CX-39 | **Sub-agent** | Ask before writes; `use a sub-agent to create child.txt` | Card says "(sub-agent)" and shows the diff; Approve → file exists |
 | CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 5 tiers, then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
-| CX-41 | **Untrusted project** | Ask me in a project with no `[projects]` entry | `sandbox: read-only` sent, ⚠️ row; `~/.codex/config.toml` sha unchanged |
+| CX-41 | **Untrusted project** | Record `sha256sum ~/.codex/config.toml`. Ask me, `Reply PONG`: (a) flat: a project with no `[projects]` entry; (b) nested ([#1408](https://github.com/littlebearapps/untether/issues/1408)): a git repo inside a listed folder, with no entry of its own; (c) shadowing: a subfolder whose own entry has no `trust_level`, inside a trusted repo; (d) control: a subfolder of the trusted `codex-test` | (a)–(c): log `codex.app_server.untrusted_read_only cwd=… repo_root=…`, `sandbox: read-only` sent, ⚠️ row; (d): `workspace-write`, no row; the sha is unchanged after all four and no new `[projects."…"]` key appears |
 
 CX-19…CX-21b run on both transports unless the row says otherwise.
 
