@@ -357,6 +357,16 @@ def _store(tmp_path: Path) -> TrustStore:
     return TrustStore(tmp_path / TRUST_FILENAME)
 
 
+def test_trust_store_file_is_owner_only(tmp_path: Path) -> None:
+    # The record can switch on agy's bypass, so nobody else may write it.
+    store = _store(tmp_path)
+    assert store.set(1, "/p", _record())
+    assert (tmp_path / TRUST_FILENAME).stat().st_mode & 0o777 == 0o600
+    os.chmod(tmp_path / TRUST_FILENAME, 0o664)
+    assert store.revoke(1, "/p")
+    assert (tmp_path / TRUST_FILENAME).stat().st_mode & 0o777 == 0o600
+
+
 def test_trust_store_missing_file_trusts_nothing(tmp_path: Path) -> None:
     assert _store(tmp_path).get(1, "/p") is None
 

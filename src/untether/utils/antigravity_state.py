@@ -256,7 +256,7 @@ class TrustStore:
             "records": {k: asdict(v) for k, v in records.items()},
         }
         try:
-            atomic_write_json(self.path, payload)
+            atomic_write_json(self.path, payload, mode=0o600)
             ok = True
         except (OSError, TypeError, ValueError) as exc:
             logger.warning(

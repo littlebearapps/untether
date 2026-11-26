@@ -16,11 +16,14 @@ def atomic_write_json(
     *,
     indent: int = 2,
     sort_keys: bool = True,
+    mode: int | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(f"{path.suffix}.tmp")
     try:
         with open(tmp_path, "w", encoding="utf-8") as handle:
+            if mode is not None:
+                os.chmod(tmp_path, mode)  # before any content lands
             json.dump(payload, handle, indent=indent, sort_keys=sort_keys)
             handle.write("\n")
     except (TypeError, ValueError, OSError) as exc:
