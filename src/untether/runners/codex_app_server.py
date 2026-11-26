@@ -53,6 +53,7 @@ from ..schemas.codex_app_server import (
 )
 from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
+from ..utils.git import git_stdout
 from ..utils.paths import get_run_base_dir, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import terminate_process
@@ -487,17 +488,35 @@ def sandbox_policy_mode(policy: Any) -> str | None:
     return None
 
 
-def has_trust_entry(projects: Any, cwd: str) -> bool:
-    """Whether Codex's ``[projects]`` table (from ``config/read``) has an
-    entry, trusted or not, for *cwd* or a parent. Codex keeps an explicit
-    entry and writes one only when there's none (P1, 0.170.0)."""
+def selected_project_entry(projects: Any, cwd: str, repo_root: str | None) -> Any:
+    """The ``[projects]`` entry (from ``config/read``) Codex applies to *cwd*:
+    the first key present, in ``ProjectTrustLookup::from_paths`` order
+    (codex-cli 0.171.0): canonical cwd, cwd, canonical repo root, repo root.
+    No parent walk, and a cwd entry shadows the root's even with no
+    ``trust_level`` (#1408). config/read has no trust field, so Untether
+    mirrors the lookup (gap register)."""
     if not isinstance(projects, dict) or not cwd:
-        return False
-    paths: set[Path] = set()
-    for path in (Path(cwd), Path(cwd).resolve()):
-        paths.add(path)
-        paths.update(path.parents)
-    return any(isinstance(projects.get(str(p)), dict) for p in paths)
+        return None
+    for path in (cwd, repo_root):
+        if not path:
+            continue
+        for key in dict.fromkeys((str(Path(path).resolve()), path)):
+            if key in projects:
+                return projects[key]
+    return None
+
+
+def git_repo_root(cwd: Path) -> str | None:
+    """*cwd*'s git repo root for the trust lookup, or None unless
+    ``<toplevel>/.git`` is a real directory. Linked worktrees, submodules and
+    ``--separate-git-dir`` checkouts fail closed (#1408; worktrees: #1413)."""
+    top = git_stdout(
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"], cwd=cwd
+    )
+    if top is None:
+        return None
+    dot_git = Path(top) / ".git"
+    return top if dot_git.is_dir() and not dot_git.is_symlink() else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -575,6 +594,8 @@ class AppServerRunState(CodexRunState):
     sandbox: str | None = None
     # Writable tiers: config/read decides whether that sandbox is safe to send.
     check_trust: bool = False
+    # #1408: the cwd's git repo root as Codex's trust lookup sees it.
+    repo_root: str | None = None
     # #1369: Codex's configured model (config/read), sent on a resume with no
     # /model override, since a resumed thread otherwise keeps its saved model.
     config_model: str | None = None
@@ -685,6 +706,10 @@ class CodexAppServerRunner(CodexRunner):
         # Stdin stays open. Only *write* initialize: the base starts reading
         # stdout after this returns, so nothing may wait for an answer here.
         state.proc = proc
+        if state.check_trust:
+            state.repo_root = await anyio.to_thread.run_sync(
+                git_repo_root, Path(state.cwd)
+            )
         state.peer = CodexRpcPeer(
             proc.stdin.send,
             write_timeout=self.write_timeout_s,
@@ -1383,11 +1408,16 @@ class CodexAppServerRunner(CodexRunner):
     def _decide_sandbox(self, state: AppServerRunState, result: Any) -> None:
         """Full auto omits ``sandbox`` (Codex's own setting), and Ask me /
         Auto-review send ``workspace-write``, only where that can't make Codex
-        trust the project (DEC-7, P1, D1): a writable sandbox in a project
-        with no ``[projects]`` entry saves it as trusted."""
+        trust the project (DEC-7, P1, D1, #1408): a writable sandbox where
+        Codex's selected ``[projects]`` entry has no ``trust_level`` (or there
+        is none) saves the project as trusted."""
         config = result.get("config") if isinstance(result, dict) else None
         config = config if isinstance(config, dict) else {}
-        if has_trust_entry(config.get("projects"), state.cwd):
+        entry = selected_project_entry(
+            config.get("projects"), state.cwd, state.repo_root
+        )
+        # Codex saves trust only where the selected entry has no trust_level.
+        if isinstance(entry, dict) and entry.get("trust_level"):
             return
         sandbox_mode = config.get("sandbox_mode")
         wanted = state.sandbox or sandbox_mode
@@ -1395,6 +1425,7 @@ class CodexAppServerRunner(CodexRunner):
         logger.info(
             "codex.app_server.untrusted_read_only",
             cwd=state.cwd,
+            repo_root=state.repo_root,
             sandbox_mode=sandbox_mode,
             mode_sandbox=wanted,
         )
