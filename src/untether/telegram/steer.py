@@ -223,10 +223,14 @@ async def maybe_steer(
         resume_token = await resolve_token()
 
     target_engine = resume_token.engine if resume_token is not None else engine
-    if target_engine == "antigravity":
-        from ..utils.antigravity_argv import native_compact_prompt
+    if target_engine in ("antigravity", "codex"):
+        from ..utils.antigravity_argv import COMPACT_COMMAND, native_compact_prompt
 
-        if native_compact_prompt(prompt_text) is not None:
+        native = native_compact_prompt(prompt_text)
+        # #964: Codex's is only the bare command (D6).
+        if native is not None and (
+            target_engine == "antigravity" or native == COMPACT_COMMAND
+        ):
             # #1114: agy's /compact is a run of its own on the conversation;
             # injected into a running turn it would be text for the model.
             # It queues, like every command.

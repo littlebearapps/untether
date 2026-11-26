@@ -33,6 +33,7 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("client_request", "thread/list"): "S",
     ("client_request", "turn/start"): "S",
     ("client_request", "turn/interrupt"): "S",
+    ("client_request", "thread/compact/start"): "S",  # #964 /compact
     ("client_notification", "initialized"): "S",
     # Zero-token reads (runners/codex_reads.py: #966, #846, #423). config/read
     # is also the runner's trust and model check (#1369).

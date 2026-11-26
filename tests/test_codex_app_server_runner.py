@@ -351,6 +351,19 @@ for line in sys.stdin:
         out({"method": "thread/started", "params": {"thread": thread(tid)}})
         if SC.get("stop_reading_after_thread"):
             time.sleep(30)
+    elif method == "thread/compact/start":  # #964 (P-C shape, 0.171.0)
+        tid = msg["params"]["threadId"]
+        if SC.get("compact_error"):
+            out({"id": rid, "error": {"code": -32600, "message": SC["compact_error"]}})
+            continue
+        turn = {"id": "turn-c", "status": "inProgress", "items": []}
+        out({"id": rid, "result": {}})
+        out({"method": "turn/started", "params": {"threadId": tid, "turn": turn}})
+        for n in SC.get("compact_notifications", []):
+            out(n)
+        out({"method": "turn/completed", "params": {"threadId": tid, "turn": {
+            "id": "turn-c", "status": SC.get("status", "completed"), "items": [],
+            "error": SC.get("turn_error")}}})
     elif method == "thread/list":
         out({"id": rid, "result": {"data": [thread(t) for t in SC.get("listed", [])]}})
     elif method == "turn/start":

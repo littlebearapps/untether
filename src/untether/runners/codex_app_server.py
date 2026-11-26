@@ -51,6 +51,7 @@ from ..schemas.codex_app_server import (
     CODEX_APP_SERVER_USED,
     MIN_TESTED_APP_SERVER_VERSION,
 )
+from ..utils.antigravity_argv import COMPACT_COMMAND, native_compact_prompt
 from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
 from ..utils.paths import get_run_base_dir, relativize_path
@@ -262,6 +263,12 @@ class AppServerSupport:
 _SUPPORT_CACHE: dict[tuple[str, float], AppServerSupport] = {}
 
 
+def _is_compact(prompt: str) -> bool:
+    """#964: only a bare ``/compact`` (or ``/compact@bot``) is Codex's
+    compaction; ``/compact <text>`` stays an ordinary prompt (D6)."""
+    return native_compact_prompt(prompt) == COMPACT_COMMAND
+
+
 def _cli_version(path: str) -> str | None:
     try:
         proc = _run([path, "--version"], tempfile.gettempdir())
@@ -395,6 +402,13 @@ _SILENT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt", "plan"})
 # #832: Claude's 🗜️ wording (#819), so both engines read the same.
 _COMPACTING_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Compacting context…"
 _COMPACTED_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
+# #964: a bare /compact with no saved Codex session (same pre-spawn key as
+# Antigravity's #1114, so the bridge answers it as plain text).
+NOTHING_TO_COMPACT_TEXT = (
+    "Nothing to compact: this chat has no Codex session yet. "
+    "Send a normal message to start one."
+)
+COMPACT_NO_CONVERSATION_BLOCK = "compact_no_conversation"
 _CONTEXT_ACTION_ID = "codex.context"
 _UNKNOWN_ITEMS_LOGGED: set[str] = set()
 # App-server names -> exec's, so exec's title helpers give the same rows.
@@ -634,6 +648,8 @@ class AppServerRunState(CodexRunState):
     context: tuple[int, int, int] | None = None
     ctx_emitted: tuple[int, int] | None = None
     compactions: int = 0
+    # #964: a bare /compact run (thread/compact/start in place of turn/start).
+    manual_compact: bool = False
     # #963: open approval cards (set once the thread is known; attended runs
     # only), fileChange items by id for their diff (cached before the
     # sub-agent filter), the chat's Diff preview, and an unattended run's
@@ -665,6 +681,15 @@ class CodexAppServerRunner(CodexRunner):
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
     ) -> AsyncIterator[UntetherEvent]:
+        if resume is None and _is_compact(prompt):
+            # #964: no thread, nothing to compact; never an empty run or probe.
+            logger.info("codex.app_server.compact_no_conversation")
+            yield EventFactory(ENGINE).completed_error(
+                error=NOTHING_TO_COMPACT_TEXT,
+                resume=None,
+                usage={PRESPAWN_BLOCKED_KEY: COMPACT_NO_CONVERSATION_BLOCK},
+            )
+            return
         # #961: refuse a CLI without the protocol before anything spawns.
         refusal = await app_server_unsupported_event(self.codex_cmd, resume)
         if refusal is not None:
@@ -677,7 +702,11 @@ class CodexAppServerRunner(CodexRunner):
                 yield evt
 
     def new_state(self, prompt: str, resume: ResumeToken | None) -> AppServerRunState:
-        return AppServerRunState(factory=EventFactory(ENGINE), prompt=prompt)
+        return AppServerRunState(
+            factory=EventFactory(ENGINE),
+            prompt=prompt,
+            manual_compact=resume is not None and _is_compact(prompt),
+        )
 
     def build_args(
         self, prompt: str, resume: ResumeToken | None, *, state: Any
@@ -987,7 +1016,7 @@ class CodexAppServerRunner(CodexRunner):
                 "model": state.model,
             }
         if state.compactions:
-            # Untether never starts one itself (manual /compact is #964).
+            # Mid-turn (auto); a /compact run overrides this (#964).
             out["compaction"] = {"count": state.compactions, "trigger": "auto"}
         if state.unattended_denied:
             # #835: the bridge's footer line for an unattended run's denials.
@@ -1532,6 +1561,13 @@ class CodexAppServerRunner(CodexRunner):
         events.extend(state.pending_rows)
         state.pending_rows.clear()
         events.extend(self._echo_check(result, state=state))
+        if state.manual_compact:
+            # #964: Codex's own compaction (stable), not the text as a prompt.
+            logger.info("codex.app_server.compact_started", thread_id=result.thread.id)
+            state.outbox.append(
+                ("request", "thread/compact/start", {"threadId": result.thread.id})
+            )
+            return events
         turn: dict[str, Any] = {
             "threadId": result.thread.id,
             "input": [{"type": "text", "text": state.prompt}],
@@ -1757,12 +1793,24 @@ class CodexAppServerRunner(CodexRunner):
         state.saw_result = True  # sub-agent turns are filtered out upstream
         cards = self._retire_cards(state)  # #963: none may keep its buttons
         if turn.status == "completed":
+            usage = None
+            if state.manual_compact:
+                # #964: the bridge answers "🗜️ Context compacted" for this.
+                # No token figures: an excludeTurns resume replays no usage,
+                # and the compact turn's ``last`` is the compaction request.
+                usage = {
+                    "compaction": {
+                        "count": state.compactions,
+                        "trigger": "manual",
+                        "manual_success": True,
+                    }
+                }
             return [
                 *cards,
                 state.factory.completed_ok(
                     answer=self._answer(state),
                     resume=found_session or resume,
-                    usage=self._run_usage(state, None),
+                    usage=self._run_usage(state, usage),
                 ),
             ]
         rows = cards + self._close_open_items(
