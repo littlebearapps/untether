@@ -1198,33 +1198,16 @@ def _pkg_decisions(logs: list[dict[str, Any]]) -> list[tuple[str, str]]:
 
 
 @pytest.mark.anyio
-async def test_trusted_run_edit_to_package_json_asks(
+async def test_trusted_run_every_edit_asks(
     project: Path,
     gate_env: dict[str, Path],
     foreign_stop: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1032, Codex review finding 1 (AG-61h): a trusted `npm run check`
-    hook would run whatever package.json says, so in a trusted run an edit
-    to package.json (or the hook's own script) gets a card, never the safe
-    list."""
-    script = project / "scripts" / "check.sh"
-    script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
-
-    async def listing(runner: Any, cwd: Path) -> dict[str, Any]:
-        extra = {
-            "name": "lint",
-            "enabled": True,
-            "source": str(foreign_stop),
-            "actions": [
-                {"event": "Stop", "type": "command", "command": "npm run check"},
-                {"event": "Stop", "type": "command", "command": "sh scripts/check.sh"},
-            ],
-        }
-        return hooks_listing(extra_groups=[extra])
-
-    monkeypatch.setattr(gate_precheck, "_probe_hooks", listing)
+    """#1032, Codex reviews (AG-61h): a trusted hook can run any project file
+    (a script behind `npm run`, an imported module, a test), so in a run that
+    uses a trust record every in-project edit gets a card, never the safe
+    list: package.json here, README.md in the second run. Reads don't ask."""
     (project / "package.json").write_text('{"scripts": {"check": "eslint ."}}')
     monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
     runner = _runner()
@@ -1242,10 +1225,20 @@ async def test_trusted_run_edit_to_package_json_asks(
         and e.action.detail.get("request_type") == "PreToolUse"
     ]
     assert len(cards) == 1
-    assert "a protected file in this project" in cards[0].action.title
+    assert "this run uses trusted agy config, so every edit asks" in (
+        cards[0].action.title
+    )
     assert _pkg_decisions(logs) == [("allow", "user")]
+    (card_log,) = _events(logs, "antigravity.gate.card")
+    assert card_log["why"] == "trusted"
     (listening,) = _events(logs, "antigravity.gate.listening")
     assert listening["required"] is True
+    # gate_askme's in-project README.md write: a card too (untrusted: none).
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "gate_askme")
+    events, logs = await _ask_run(runner)
+    assert _contract(events).ok
+    whys = [log["why"] for log in _events(logs, "antigravity.gate.card")]
+    assert whys.count("trusted") == 1 and len(whys) == 4
 
 
 @pytest.mark.anyio

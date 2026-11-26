@@ -1187,9 +1187,6 @@ class _RunPrecheck:
     # #1032: (chat id, project root, short digest) of the trust record this
     # Ask me run used; the post-run re-scan revokes it on a change (D11).
     trusted: tuple[int, str, str] | None = None
-    # #1032 (Codex review finding 1): what that record's hooks run, protected
-    # by the gate for the run (``gate_trust.protected_inputs``).
-    trust_protected: tuple[str, ...] | None = None
     auth_route: str = "oauth"
     # #1044 (Workspace only): why the check before the run gave no usable
     # ``toolPermission``; None when it gave one (``config.tool_permission``).
@@ -2326,7 +2323,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             channel_id=get_run_channel_id(),
             outbox_dir=outbox_dir,
             outside=worktree_roots,
-            trust_protected=pre.trust_protected if decision.gated else None,
+            # #1032: a trusted run's every in-project edit asks.
+            trusted_config=decision.gated and pre.trusted is not None,
         )
         try:
             await gate.open()
@@ -2435,9 +2433,6 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             )
             pre.label_suffix += " · trusted agy config"
             pre.trusted = (chat_id, root, fp.short)
-            pre.trust_protected = await anyio.to_thread.run_sync(
-                gate_trust.protected_inputs, pre.scan, result, pre.cwd
-            )
             return {"foreign_trusted": True}
         untrustable = fp.reason if isinstance(fp, gate_trust.Untrustable) else None
         out: dict[str, Any] = {}

@@ -100,6 +100,10 @@ async def test_trust_ask_shows_disclosure_and_keeps_offer(tmp_path: Path) -> Non
     assert FP.short in msg.text
     assert "without asking in Telegram" in msg.text
     assert "Scheduled runs never use it" in msg.text
+    assert (
+        "every file edit in this project will ask for approval while trust is on"
+        in msg.text
+    )
     assert len(msg.text) <= 1000
     assert _keyboard(msg) == [
         [

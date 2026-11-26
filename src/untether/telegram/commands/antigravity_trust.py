@@ -113,7 +113,9 @@ def disclosure_html(fp: gate_trust.Fingerprint) -> str:
             "Ask me will run here with these loaded. Their own commands run"
             " <b>without asking in Telegram</b>, and they can see each tool call"
             " and add instructions for agy. agy's tool calls still need your"
-            " approval as usual.",
+            " approval as usual, and <b>every file edit in this project will ask"
+            " for approval while trust is on</b> (a trusted hook could run what"
+            " was edited).",
             "Any change to this config, or an agy update, asks again. Scheduled"
             " runs never use it. Revoke any time in /config → 🔐 Telegram"
             " approvals.",

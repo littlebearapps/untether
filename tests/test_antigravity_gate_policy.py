@@ -1431,90 +1431,56 @@ def test_always_allow_refused_for_unusual_characters(command: str) -> None:
     assert gate_policy.always_allowable({"CommandLine": "npm test\n\tx"})
 
 
-# ── #1032: a trusted run protects what the trusted hooks run ──────────────
+# ── #1032: in a trusted run every in-project edit asks ───────────────────
 
 
-def _trusted_edit(target: Path, root: Path, protected: tuple[str, ...] | None):
+def _trusted_edit(target: Path, root: Path, trusted: bool):
     return classify(
         "write_to_file",
         _edit(target),
         root=root,
         conversation_id=CID,
-        trust_protected=protected,
+        trusted_config=trusted,
     )
 
 
 @pytest.mark.parametrize(
     "rel",
-    [
-        "package.json",
-        "package-lock.json",
-        "web/package.json",  # any depth
-        "Makefile",
-        "GNUmakefile",
-        "build/rules.mk",
-        "pyproject.toml",
-        "setup.py",
-        "requirements-dev.txt",
-        "Cargo.toml",
-        "go.mod",
-        "justfile",
-        "conftest.py",
-        "node_modules/.bin/eslint",
-        ".venv/bin/python",
-    ],
+    ["README.md", "src/x.py", "scripts/check.js", "package.json", "tests/test_x.py"],
 )
-def test_trusted_run_protects_manifests_and_runner_folders(
-    root: Path, rel: str
-) -> None:
-    """A write to package.json in a trusted run asks; the same write in an
-    untrusted (no foreign config) Ask me run is on the safe list as before."""
+def test_trusted_run_every_edit_asks(root: Path, rel: str) -> None:
+    """A trusted hook can run any project file (Codex review: a protected
+    list can't name them all), so in a run that uses a trust record every
+    in-project write asks; the same write in an untrusted Ask me run is on
+    the safe list exactly as before."""
     target = root / rel
-    verdict = _trusted_edit(target, root, ())
-    assert not verdict.allow and verdict.why == "protected"
-    assert _trusted_edit(target, root, None).allow
+    verdict = _trusted_edit(target, root, True)
+    assert not verdict.allow and verdict.why == "trusted"
+    assert _trusted_edit(target, root, False).allow
+    # agy 1.5.x's write tool too.
+    args = {"Path": str(target), "Content": "x"}
+    for trusted in (True, False):
+        verdict_15 = classify(
+            "write_file", args, root=root, conversation_id=CID, trusted_config=trusted
+        )
+        assert verdict_15.allow is (not trusted)
+    title = gate_policy.card_title("write_to_file", _edit(target), verdict, root=root)
+    assert "this run uses trusted agy config, so every edit asks" in title
 
 
-def test_trusted_run_protects_hook_scripts_and_dirs(root: Path) -> None:
-    script = root / "scripts" / "check.sh"
-    script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
-    pkg = root / "tools" / "lint"
-    pkg.mkdir(parents=True)
-    protected = (str(script), str(pkg))
-    for target in (script, pkg / "__main__.py", pkg / "new.py"):
-        verdict = _trusted_edit(target, root, protected)
-        assert not verdict.allow and verdict.why == "protected", target
-    # An unrelated file still runs without a card in the trusted run.
-    assert _trusted_edit(root / "src" / "app.py", root, protected).allow
-    # Untrusted runs: unchanged.
-    assert _trusted_edit(script, root, None).allow
+def test_trusted_run_reads_unchanged(root: Path) -> None:
+    for trusted in (True, False):
+        assert classify(
+            "view_file",
+            {"AbsolutePath": str(root / "README.md")},
+            root=root,
+            conversation_id=CID,
+            trusted_config=trusted,
+        ).allow
 
 
-def test_trusted_inputs_path_tricks_dont_escape(root: Path) -> None:
-    script = root / "scripts" / "check.sh"
-    script.parent.mkdir()
-    script.write_text("#!/bin/sh\n")
-    protected = (str(script),)
-    # Case: folded like every other protected name.
-    upper = classify(
-        "write_to_file",
-        _edit(root / "scripts" / "CHECK.sh"),
-        root=root,
-        conversation_id=CID,
-        trust_protected=protected,
-    )
-    assert not upper.allow
-    assert not _trusted_edit(root / "PACKAGE.JSON", root, ()).allow
-    # ``..``: not a plain absolute path.
-    dotted = Path(str(root / "src" / ".." / "scripts" / "check.sh"))
-    assert not _trusted_edit(dotted, root, protected).allow
-    # A symlink to the script.
-    (root / "alias.sh").symlink_to(script)
-    assert not _trusted_edit(root / "alias.sh", root, protected).allow
-    # A hard link to the script.
-    os.link(script, root / "hard.sh")
-    assert not _trusted_edit(root / "hard.sh", root, protected).allow
-    # A symlinked folder on the way.
-    (root / "linked").symlink_to(script.parent, target_is_directory=True)
-    assert not _trusted_edit(root / "linked" / "check.sh", root, protected).allow
+def test_trusted_run_keeps_stronger_reasons(root: Path) -> None:
+    """Outside, protected and self verdicts keep their own reason."""
+    assert _trusted_edit(root / ".agents" / "x.json", root, True).why == "protected"
+    outside = root.parent / "elsewhere.txt"
+    assert _trusted_edit(outside, root, True).why == "outside"

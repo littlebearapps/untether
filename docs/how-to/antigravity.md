@@ -239,8 +239,8 @@ footer says `ask me · trusted agy config`.
 
 - Trusted hooks and MCP servers run their own commands without asking, and they can see each tool call and add
   instructions for agy. agy's own tool calls still need your approval as usual.
-- While Ask me runs on a trusted config, edits to what those hooks run (their scripts, the agy config, and files such
-  as `package.json`, `Makefile` or `pyproject.toml`) ask for approval even inside the project.
+- While Ask me runs on a trusted config, **every file edit in the project asks for approval**, because a trusted hook
+  could run what was edited. Reads still run on their own.
 - Any change to that config, or an agy update, asks again. Scheduled runs (crons and webhooks) never use it.
 - In a group, only an admin can trust or revoke. The button works once, in the chat it was posted in, for an hour.
 - It can't be offered when agy also loads another `PreToolUse` hook (it could approve or change a call after

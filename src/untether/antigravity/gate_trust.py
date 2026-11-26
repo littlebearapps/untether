@@ -35,7 +35,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import stat
 import time
 from dataclasses import dataclass
@@ -203,55 +202,6 @@ def _key_path(key: str, root_real: str, home_real: str) -> str:
     if os.path.isabs(key):
         return key
     return os.path.join(root_real, key)
-
-
-_SCRIPT_SUFFIXES = (
-    ".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".rb",
-    ".pl", ".php", ".lua", ".ps1",
-)  # fmt: skip
-
-
-def protected_inputs(
-    scan: antigravity_scan.ScanResult, precheck: GatePrecheck, cwd: Path
-) -> tuple[str, ...]:
-    """What a trusted run's foreign hooks run, for the gate to protect
-    (#1032, Codex review finding 1): every file of the fingerprinted agy set
-    (hook manifests and the scripts they name by literal path), every path
-    a listed hook command names (``./x.sh``, ``scripts/lint.py``, any token
-    with a ``/`` or a script suffix, against the project root and the run
-    folder) and, for ``-m <module>``, the module's file and package folder.
-    Runner manifests (``package.json``, ``Makefile``…) are protected by name
-    in ``gate_policy`` on top of these. Over-inclusive on purpose."""
-    root_real = os.path.realpath(scan.root)
-    home_real = os.path.realpath(Path.home())
-    bases = tuple(dict.fromkeys((root_real, os.path.realpath(cwd))))
-    out = [os.path.realpath(_key_path(k, root_real, home_real)) for k in scan.agy]
-    for group in precheck.foreign_groups:
-        for action in group.actions:
-            command = action.get("command")
-            if not isinstance(command, str):
-                continue
-            try:
-                tokens = shlex.split(command, comments=True)
-            except ValueError:
-                tokens = command.split()
-            for index, token in enumerate(tokens):
-                token = token.split("=", 1)[-1] if "=" in token else token
-                names: list[str] = []
-                if index > 0 and tokens[index - 1] == "-m" and token:
-                    module = token.replace(".", "/")
-                    names += [module, module + ".py"]
-                elif "/" in token or token.lower().endswith(_SCRIPT_SUFFIXES):
-                    names.append(token)
-                for name in names:
-                    expanded = os.path.expanduser(name)
-                    if os.path.isabs(expanded):
-                        out.append(os.path.realpath(expanded))
-                    else:
-                        out += [
-                            os.path.realpath(os.path.join(b, expanded)) for b in bases
-                        ]
-    return tuple(dict.fromkeys(out))
 
 
 # ── one-shot offers (``budget_gate.register_pending_run`` shape) ────────────

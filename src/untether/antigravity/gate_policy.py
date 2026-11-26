@@ -589,98 +589,6 @@ def _protected_rel(rel: str, outbox_dir: str = DEFAULT_OUTBOX_DIR) -> bool:
     return deny_reason(Path(rel), _SECRET_GLOBS) is not None
 
 
-# #1032: what a trusted foreign hook can run, protected in a run that uses
-# "Trust current config" (``trust_protected`` is not None). Hook commands
-# that call package managers, build tools or interpreters read these, so an
-# in-run edit would change what a trusted hook executes without a tap. Kept
-# over-inclusive and applied whatever the hook command says: a hook can call
-# a script that calls ``npm``. Names are casefolded, at any depth.
-TRUST_MANIFEST_NAMES = frozenset(
-    {
-        # npm / npx / pnpm / yarn / bun / deno
-        "package.json",
-        "package-lock.json",
-        "npm-shrinkwrap.json",
-        "yarn.lock",
-        ".yarnrc",
-        ".yarnrc.yml",
-        ".pnp.cjs",
-        ".pnp.loader.mjs",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        ".pnpmfile.cjs",
-        "bun.lock",
-        "bun.lockb",
-        "bunfig.toml",
-        ".npmrc",
-        "deno.json",
-        "deno.jsonc",
-        "deno.lock",
-        # make / just / task / rake
-        "makefile",
-        "gnumakefile",
-        "justfile",
-        ".justfile",
-        "taskfile.yml",
-        "taskfile.yaml",
-        "rakefile",
-        # python: pip, uv, poetry, pipenv, tox, nox, pytest
-        "pyproject.toml",
-        "setup.py",
-        "setup.cfg",
-        "uv.lock",
-        "poetry.lock",
-        "pipfile",
-        "pipfile.lock",
-        "tox.ini",
-        "noxfile.py",
-        "conftest.py",
-        "pytest.ini",
-        "sitecustomize.py",
-        "usercustomize.py",
-        # rust / go / ruby / php
-        "cargo.toml",
-        "cargo.lock",
-        "build.rs",
-        "go.mod",
-        "go.sum",
-        "go.work",
-        "gemfile",
-        "gemfile.lock",
-        "composer.json",
-        "composer.lock",
-    }
-)
-# Folders whose files those runners execute (installed tools, virtualenvs).
-TRUST_DIR_NAMES = frozenset(
-    {"node_modules", ".venv", "venv", "__pypackages__", ".yarn", ".cargo"}
-)
-
-
-def _trust_input(real: str, rel: str, protected: tuple[str, ...]) -> bool:
-    """*real* (``rel`` in the project) is something a trusted hook runs:
-    a path the trust decision named (hook scripts, agy config files, a
-    ``-m`` package folder) or a runner manifest / folder."""
-
-    def fold(text: str) -> str:
-        # Casefolded on every platform, like the protected names: over-
-        # inclusive on a case-sensitive file system, exact on macOS.
-        return unicodedata.normalize("NFC", text).casefold()
-
-    folded = fold(real)
-    for path in protected:
-        base = fold(path)
-        if folded == base or folded.startswith(base.rstrip(os.sep) + os.sep):
-            return True
-    parts = fold(rel).split("/")
-    name = parts[-1]
-    if name in TRUST_MANIFEST_NAMES or name.endswith(".mk"):
-        return True
-    if name.startswith("requirements") and name.endswith((".txt", ".in")):
-        return True
-    return any(part in TRUST_DIR_NAMES for part in parts[:-1])
-
-
 @dataclass(frozen=True, slots=True)
 class _Scope:
     root: Path
@@ -692,9 +600,11 @@ class _Scope:
     outside: tuple[str, ...]
     config_path: Path | str | None
     artifact_path: Any
-    # #1032: None unless the run uses "Trust current config"; then the
-    # realpaths the trusted hooks run (:func:`_trust_input`).
-    trust_protected: tuple[str, ...] | None = None
+    # #1032: the run uses "Trust current config". A trusted foreign hook can
+    # run any project file (a script behind ``npm run``, an imported module,
+    # a test), so every in-project edit asks (Codex review, Nathan's
+    # decision 2026-11-26).
+    trusted_config: bool = False
 
 
 def _scope(
@@ -705,7 +615,7 @@ def _scope(
     outside: tuple[Path | str, ...],
     config_path: Path | str | None,
     artifact_path: Any,
-    trust_protected: tuple[str, ...] | None = None,
+    trusted_config: bool = False,
 ) -> _Scope:
     return _Scope(
         root=root,
@@ -715,11 +625,7 @@ def _scope(
         outside=tuple(_real(p) for p in outside),
         config_path=config_path,
         artifact_path=artifact_path,
-        trust_protected=(
-            None
-            if trust_protected is None
-            else tuple(_real(p) for p in trust_protected)
-        ),
+        trusted_config=trusted_config,
     )
 
 
@@ -749,7 +655,7 @@ def classify_edit(
     outside: tuple[Path | str, ...] = (),
     config_path: Path | str | None = None,
     artifact_path: Any = None,
-    trust_protected: tuple[str, ...] | None = None,
+    trusted_config: bool = False,
 ) -> Verdict:
     """An edit tool's targets: every path it names inside the project (or
     the conversation's artifact folder), not protected, not hard-linked →
@@ -767,7 +673,7 @@ def classify_edit(
         outside,
         config_path,
         artifact_path,
-        trust_protected,
+        trusted_config,
     )
     return _classify_paths(paths, scope, write=True)
 
@@ -818,10 +724,8 @@ def _classify_paths(paths: list[Any], scope: _Scope, *, write: bool) -> Verdict:
         rel = PurePosixPath(*Path(os.path.relpath(real, base)).parts).as_posix()
         if rel == "." or _protected_rel(rel, scope.outbox_dir):
             return Verdict(False, "protected")
-        if scope.trust_protected is not None and _trust_input(
-            real, rel, scope.trust_protected
-        ):
-            return Verdict(False, "protected")
+        if scope.trusted_config:
+            return Verdict(False, "trusted")
     return ALLOW
 
 
@@ -837,7 +741,7 @@ def classify(
     outside: tuple[Path | str, ...] = (),
     config_path: Path | str | None = None,
     artifact_path: Any = None,
-    trust_protected: tuple[str, ...] | None = None,
+    trusted_config: bool = False,
 ) -> Verdict:
     """Ask me's safe list: exact tool names, fully resolved paths. Anything
     it can't prove safe — including an error while checking — asks.
@@ -845,8 +749,8 @@ def classify(
     in-project edits too, with the diff (Claude's C5). ``outbox_dir`` is the
     instance's ``files.outbox_dir``, ``outside`` the ``@branch`` worktree
     roots, ``config_path`` the instance's config file, ``artifact_path``
-    the payload's ``artifactDirectoryPath`` and ``trust_protected`` (#1032)
-    what a trusted foreign hook runs (None when the run uses no trust)."""
+    the payload's ``artifactDirectoryPath``; ``trusted_config`` (#1032): the
+    run uses a trust record, so every in-project edit asks."""
     try:
         scope = (
             _scope(
@@ -857,7 +761,7 @@ def classify(
                 outside,
                 config_path,
                 artifact_path,
-                trust_protected,
+                trusted_config,
             )
             if root is not None
             else None
@@ -1440,6 +1344,7 @@ def _subagents_preview(args: dict[str, Any]) -> str:
 _WHY_NOTE = {
     "outside": "outside this project",
     "protected": "a protected file in this project",
+    "trusted": "this run uses trusted agy config, so every edit asks",
     "self": "Untether's own files — approving lets agy change Telegram approvals",
     "mismatch": "agy's workspace isn't this chat's project",
     "unclear": "arguments Untether can't check",
