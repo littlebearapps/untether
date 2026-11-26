@@ -74,6 +74,9 @@ cannot stop mid-run to ask.
 - **`decide_antigravity_mode()` is the only source of the bypass flag**; `build_args` reads its `ModeDecision`. Ask
   me without a ready gate refuses (`gate_missing`, `gate_not_ready`, `gate_self_protect`, `gate_foreign_config`),
   never downgrades. Unknown stored values fail closed to Workspace.
+- The one exception to `gate_foreign_config` (#1032): an attended run whose foreign set matches this chat's trust
+  record exactly (`antigravity/gate_trust.py` fingerprint, `antigravity_trust.json`, `GateFacts.foreign_trusted`).
+  Never for a foreign `PreToolUse` hook or a custom agent with hooks; crons/webhooks never use it.
 - Precedence: chat/topic (or a cron's own `permission_mode`) → `[antigravity] permission_mode` → Workspace.
   Crons/webhooks never inherit Full access or Ask me from the chat or toml.
 - Workspace checks agy's own `toolPermission` twice (zero-token `-p /config`, cached 1 h, and `init.permission_mode`);

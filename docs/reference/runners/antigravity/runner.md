@@ -251,7 +251,7 @@ reason=…`):
 | The plugin is installed | `gate_missing`: run `untether agy-gate install` on the host |
 | The plugin is unedited and current, agy hasn't disabled it, and `agy -p /hooks` lists it for the project; the planted-config scan finished | `gate_not_ready`, with the reason (e.g. `agy plugin enable untether-gate`) |
 | The project doesn't contain Untether's own package, its venv or the plugin folder (REVIEW-2 B3) | `gate_self_protect` |
-| No hook group of another source (`-p /hooks`, any event) and nothing in the planted-config scan: the project's `.agents/` hooks, plugins, MCP servers and agents, agy's user-level plugins and agents. User-level `hooks.json` is judged by `-p /hooks`; user-level `mcp_config.json` by `agy mcp list` (an existing file with no servers, as on lba-1, is fine; a failed listing counts as "has servers") | `gate_foreign_config`, naming the paths |
+| No hook group of another source (`-p /hooks`, any event) and nothing in the planted-config scan: the project's `.agents/` hooks, plugins, MCP servers and agents, agy's user-level plugins and agents. User-level `hooks.json` is judged by `-p /hooks`; user-level `mcp_config.json` by `agy mcp list` (an existing file with no servers, as on lba-1, is fine; a failed listing counts as "has servers"). Exception: this chat's trust record for exactly that set, on an attended run ([Trusted agy config](#trusted-agy-config), [#1032](https://github.com/littlebearapps/untether/issues/1032)) | `gate_foreign_config`, naming the paths, with **🔓 Trust current config…** when the set can be trusted |
 | The run's socket is listening | `gate_not_ready` |
 
 Then agy runs with `--dangerously-skip-permissions` on its default agent and no `--mode` (the no-shell Workspace agent
@@ -382,6 +382,46 @@ value is warned once (`antigravity.permission_mode.bypass_unreported`); any othe
 no-shell agent, Ask me and Full access on agy's default agent, and agy keeps a conversation on the agent it started
 with. A chat switched from Workspace to Ask me therefore has no shell to ask about until `/new`; the `/config` toast,
 the page and `/planmode` say so. Ask me ↔ Full access and Workspace ↔ Plan first need no `/new`.
+
+### Trusted agy config
+
+**Trust current config** ([#1032](https://github.com/littlebearapps/untether/issues/1032)) lets Ask me run beside agy
+config that Untether doesn't manage, once a chat admin has seen exactly what it is. It never changes what agy loads and
+never writes under `~/.gemini`.
+
+- **The offer.** An attended Ask me run refused only with `gate_foreign_config` carries **🔓 Trust current config…**
+  when Untether could fingerprint the whole set. The tap shows the files and hook groups, a 12-character digest and
+  what the gate no longer covers, with **✅ Trust** and **Cancel**. ✅ Trust works only after that disclosure (two taps),
+  once, in the chat the refusal was posted in, within an hour; it stores what the disclosure showed, never a
+  recomputation. Nothing re-runs: send the message again.
+- **The fingerprint** (`antigravity/gate_trust.py`): sha256 over the run folder, the project root, agy's full version,
+  the planted-config scan's agy digest (every file in scope, content or stat stamp), the other hook groups exactly as
+  `agy -p /hooks` lists them (so a group in agy's `settings.json` counts) and `agy mcp list`'s output. Any change asks
+  again, an agy update included.
+- **Never trustable** (the refusal says why, no button): another `PreToolUse` hook, enabled or not (agy runs same-event
+  hooks in sequence and a PreToolUse answer can approve or rewrite a call after Untether's gate, D1); a custom agent
+  with a `hooks` key (even `hooks: []`) or front matter Untether can't read the way agy does, and every user-level
+  agent (stat only, D33): agy's `-p /hooks` never lists an agent's hooks (probe 1032-0, agy 1.5.18); an unfinished
+  scan, a failed `agy mcp list` or an unknown agy version.
+- **Scope and who.** One record per chat and project root (`antigravity_trust.json` beside `untether.toml`). In a
+  group only an admin can open the disclosure, trust, cancel or revoke (#1042 admin gate, refused before any toast).
+  Crons and webhooks never use a record and never get a button; `/at` and loop fires count as attended.
+- **Still guaranteed in a trusted run:** every tool call reaches Untether's `PreToolUse` hook and needs its `allow`
+  (safe list) or your tap; the liveness check and tripwire still apply; MCP tool calls still always ask.
+- **Not covered (the risk the admin accepts):** the trusted hooks' own commands run without asking, see each call's
+  arguments and the prompt, and can add instructions or keep a turn going; trusted MCP servers start and run
+  unprompted; programs they reach outside the fingerprint (`npx` packages, `PATH` lookups, scripts named by
+  user-level hooks) can change without the digest changing; a change made and reverted between two checks.
+- **Fails closed.** A missing, unreadable, corrupt, wrong-version or symlinked trust file means no records; a record
+  with a wrong-typed field is dropped; a failed save reports "Nothing was trusted". A change to the agy set seen by
+  the post-run re-scan, or a re-scan that fails or times out, removes the record (`reason=changed_during_run` /
+  `recheck_failed`), and a removal is kept in memory even when the file can't be saved.
+- **Revoke** in `/config` → 🔐 Telegram approvals: the page shows the record (items, digest, date, and "changed
+  since" when the newest fingerprint differs) with **🔒 Revoke trust**.
+- **Seen in:** the footer label `ask me · trusted agy config`; logs `antigravity.config_trust_offered`,
+  `.config_trusted`, `.config_trust_used`, `.config_trust_stale`, `.config_trust_revoked` (`reason=user` /
+  `changed_during_run` / `recheck_failed`), and `trust=<reason>` on `antigravity.gate.precheck_failed
+  reason=foreign_config`.
 
 ### Plan first
 
@@ -977,8 +1017,10 @@ Turn the block off with `[progress] show_background_tasks = false`.
 - **No live sessions.** Approval cards are Ask me's ([Ask me](#ask-me)); Plan first has its own Approve / Deny /
   Let's discuss card (see [Plan first](#plan-first)). Approval cards, question buttons and steer need
   [Untether's agy gate](#untethers-agy-gate) on the host.
-- **Ask me is not offered in a project with agy config Untether doesn't manage** (other hook groups, `.agents/`
-  plugins, MCP servers or agents, user-level plugins or MCP servers). There is no "trust this config" option yet.
+- **Ask me in a project with agy config Untether doesn't manage** (other hook groups, `.agents/` plugins, MCP
+  servers or agents, user-level plugins or MCP servers) needs a chat admin's **Trust current config**
+  ([Trusted agy config](#trusted-agy-config)); a foreign `PreToolUse` hook or a custom agent with hooks can't be
+  trusted at all.
 - **Ask me's previews for `sed_file`, `notebook_edit`, web and MCP tools are generic** (their argument shapes are
   unprobed, P-H13); `sed_file` and `notebook_edit` always ask.
 - **Full access has no log-only gate** (the diff rows phase 14 §7 describes); it never claimed gating.
@@ -998,7 +1040,7 @@ Turn the block off with `[progress] show_background_tasks = false`.
 
 The record required by `.claude/rules/runner-development.md` → "Native-first". Checked 2026-10-11 against agy 1.3.3
 (`--help`, `agy changelog`, the docs at antigravity.google, and live probes in a scratch repo under `$HOME`); later
-rows give their own version and date (latest: agy 1.5.12, 2026-11-19).
+rows give their own version and date (latest: agy 1.5.18, 2026-11-26).
 
 | Untether feature | Native route used | What was checked and ruled out |
 |---|---|---|
@@ -1043,6 +1085,8 @@ rows give their own version and date (latest: agy 1.5.12, 2026-11-19).
 | Plan first ([#981](https://github.com/littlebearapps/untether/issues/981)) | `--mode=plan` under the no-shell agent; approve = `--conversation=<id> --mode=accept-edits`; revise = `--conversation=<id> --mode=plan` | Partly **custom**: agy has no headless "plan ready" signal (`result` and `init.permission_mode` are the same as any turn's) and no way to answer a plan from print mode, so Untether detects the plan from the finished `write_to_file` into `brain/<conversation id>/`, reads that one file and its sidecar (realpath-contained; the D33 exception extended to this file), and keeps the pending-card store itself. agy 1.3.2's `artifactReviewPolicy` is a settings key (changing it would edit the user's agy settings). Checked 2026-10-12/13, agy 1.3.3. Retire when the stream carries the plan or agy can wait for a review headless |
 | `/export` | — (**custom**: Untether's in-memory record of the events it saw) | agy writes `transcript_full.jsonl` under `brain/<id>/` but has no export command or flag for it, and reading it is rule 3 (an engine state file, holding whole file contents). Not read. Checked 2026-10-12, agy 1.3.3 |
 | A trigger's wall-clock limit (`max_elapsed_s`, [#1125](https://github.com/littlebearapps/untether/issues/1125)) | `--print-timeout=<n>s` | **Partial**: on expiry agy reports `SUCCESS` with a partial answer and prints `[agy] print timeout after …` on stderr (REVIEW m2). Untether turns that result into a time-limit error when it has seen the stderr line by then, and keeps its own timer 30 s later as a backstop. Not live-tested; checked against `agy --help` on 1.5.14, 2026-11-23 |
+| "Trust current config" for Ask me ([#1032](https://github.com/littlebearapps/untether/issues/1032)) | — (**custom**: a fingerprint of the foreign set and a per-chat record, `antigravity/gate_trust.py`, `antigravity_trust.json`) | Checked agy 1.5.17/1.5.18, 2026-11-26 (`--help`, `agy changelog`, bundled `agy-customizations` docs, probe 1032-0). No native way to pin loaded config: no flag, setting or subcommand lists a digest of loaded customisations or refuses to start when they change, and `--settings` can't remove hooks from other files. agy's own "workspace trust" is a TUI prompt deciding whether a folder's config loads at all, not whether Untether may bypass beside it; headless `-p` loads workspace hooks regardless, and Untether never writes agy's trust store. P-T1: `-p /hooks` never lists hooks in a custom agent's front matter (a scalar or mapping `hooks` drops the agent silently; a string list loads but isn't listed), so agents with hooks are untrustable. P-T2: the digests are stable across consecutive listings. Fail-closed choices beyond the plan (2026-11-26): a revoke is kept in memory even when the file can't be saved; a failed or timed-out post-run re-check revokes too; any `hooks` key in any `.md` in the agy set rules trust out (`hooks: []` included). Retire if agy ships a native pin or lists agent hooks |
+| agy 1.5.17 / 1.5.18 (self-updated 2026-11-24 … 26) | — (no change needed) | `agy changelog` and `--help` re-read for #1032: 1.5.17 (MCP OAuth refresh, sensitive-file protections for enterprise gateways) and 1.5.18 (image validation, Windows plugin drives, `file:///` permission paths) change nothing the runner or the gate relies on |
 
 Retire or revisit when agy can continue a turn after a soft-denial, takes a per-run system prompt or tool list, or
 lets `--agent` change on a resume.
@@ -1077,6 +1121,9 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 `.bypass_without_gate` / `.not_running` / `.tripwire` /
 `.duplicate_request` / `.peer_refused` / `.token_refused` / `.plugin_changed` / `.socket_failed` /
 `.handler_failed`, `antigravity.permission_mode.gate_refused` (`reason`), `antigravity.unattended_ask_downgraded`,
+`antigravity.config_trust_offered` / `_used` / `_stale` / `_revoked` (`reason`) / `_cancelled` / `_save_failed`,
+`antigravity.config_trusted` (`chat_id`, `sender_id`, `fp`), `antigravity.trust.load_failed` / `.save_failed`,
+`handle.prespawn_buttons_dropped`,
 `permission.unattended_deny` (`engine=antigravity`, `permission_mode=ask`), `antigravity.steer.queued` / `.injected` / `.delivered` (`step`), `ask_question.shown` /
 `.answered` / `.withdrawn` (`engine=antigravity`),
 `antigravity.background.started` / `.finished` (`task_id`, `status`, `attribution=fifo` for a subagent) / `.outlived`

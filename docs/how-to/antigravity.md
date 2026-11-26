@@ -228,6 +228,22 @@ reads **🔒 Ask me — set up** and opens the plugin's status page. Untether ch
 - agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage (in the project's `.agents/`
   folder or your own `~/.gemini/config/`). They run their own commands without asking, so Ask me can't promise to
   ask. An empty `mcp_config.json` is fine: Untether asks agy (`agy mcp list`) whether any server is configured.
+  If you set that config up yourself, tap **🔓 Trust current config…** on the refusal (see below).
+
+### Trust your own agy hooks or MCP servers for Ask me
+
+When Ask me is refused only because of agy config Untether doesn't manage, the reply has a **🔓 Trust current
+config…** button [#1032](https://github.com/littlebearapps/untether/issues/1032). Tap it to see exactly what will be trusted (the files and hook groups, and a short digest)
+and what that gives up, then tap **✅ Trust**. Send your message again: Ask me now runs in this chat's project, and the
+footer says `ask me · trusted agy config`.
+
+- Trusted hooks and MCP servers run their own commands without asking, and they can see each tool call and add
+  instructions for agy. agy's own tool calls still need your approval as usual.
+- Any change to that config, or an agy update, asks again. Scheduled runs (crons and webhooks) never use it.
+- In a group, only an admin can trust or revoke. The button works once, in the chat it was posted in, for an hour.
+- It can't be offered when agy also loads another `PreToolUse` hook (it could approve or change a call after
+  Untether's check) or a custom agent with its own hooks; the reply says so.
+- Revoke it any time in `/config` → 🔐 Telegram approvals → **🔒 Revoke trust**.
 
 Workspace and Full access still work in those projects. To shorten the wait for an answer, set
 `approval_timeout_s` under `[antigravity]` (60 s or more, never longer than the plugin's own wait).
@@ -456,8 +472,8 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
 
 ## Not supported yet
 
-- Ask me in a project with agy hooks, plugins, agents or MCP servers that Untether doesn't manage: Ask me is
-  refused there, and there is no "trust this config" option yet. Workspace and Full access still work.
+- Ask me beside another agy `PreToolUse` hook, or a custom agent with its own hooks: refused, and that config
+  can't be trusted. Other agy config Untether doesn't manage can be trusted (see above).
 - Approval buttons, question buttons and `/steer` without [Untether's agy plugin](#telegram-questions-and-steer)
   on the host.
 - Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no

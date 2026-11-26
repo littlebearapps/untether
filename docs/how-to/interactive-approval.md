@@ -258,7 +258,7 @@ An edit shows the file and the lines added and removed (`📝 src/app.py`, `-` /
 
 Reminders, push notifications and [who can answer](#who-can-answer-in-a-group) work as for Claude Code. Cron runs get Ask me only from their own `permission_mode = "ask"`; with nobody to tap, everything that would ask is denied at once and the answer ends with a `🔒 unattended` footer. A chat's Ask me runs scheduled runs as Workspace.
 
-Ask me is refused (nothing runs) when the plugin isn't ready for the project, when the project contains Untether's own code, or when agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage — those run commands without asking. The reply says which and what to do; see [Troubleshooting](troubleshooting.md#antigravity-ask-me-is-refused).
+Ask me is refused (nothing runs) when the plugin isn't ready for the project, when the project contains Untether's own code, or when agy loads hooks, plugins, agents or MCP servers there that Untether doesn't manage — those run commands without asking. In that last case, if you set the config up yourself, a chat admin can tap **🔓 Trust current config…** on the reply and confirm, and Ask me then runs there until the config changes [#1032](https://github.com/littlebearapps/untether/issues/1032). The reply says which and what to do; see [Troubleshooting](troubleshooting.md#antigravity-ask-me-is-refused).
 
 #### Antigravity: Plan first
 
