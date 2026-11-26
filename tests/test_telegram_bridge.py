@@ -425,6 +425,18 @@ def test_telegram_presenter_clears_button_on_cancelled() -> None:
     assert rendered.extra["reply_markup"]["inline_keyboard"] == []
 
 
+def test_time_limit_label_clears_keyboard() -> None:
+    """#1412 item 7: a trigger's time-limit stop is a finished run too."""
+    from untether.runner_bridge import _TIME_LIMIT_LABEL
+
+    presenter = TelegramPresenter()
+    state = ProgressTracker(engine="codex").snapshot()
+
+    rendered = presenter.render_progress(state, elapsed_s=0.0, label=_TIME_LIMIT_LABEL)
+
+    assert rendered.extra["reply_markup"]["inline_keyboard"] == []
+
+
 def test_telegram_presenter_final_clears_button() -> None:
     presenter = TelegramPresenter()
     state = ProgressTracker(engine="codex").snapshot()

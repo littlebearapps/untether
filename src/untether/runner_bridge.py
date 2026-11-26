@@ -2503,6 +2503,9 @@ class RunningTask:
     # #1125: why Untether itself stopped the run (``"max_elapsed"``: a
     # trigger's time limit); None for a user's /cancel.
     stop_reason: str | None = None
+    # #1412: the time limit only closed an answered session with nothing in
+    # flight (no work was stopped).
+    stopped_idle: bool = False
 
 
 RunningTasks = dict[MessageRef, RunningTask]
@@ -2646,6 +2649,14 @@ def engine_background_busy(engine_state: Any) -> bool:
     except Exception as exc:  # noqa: BLE001 - monitor loop must not die
         logger.debug("engine_background_busy.probe_failed", error=str(exc))
     return False
+
+
+def stream_holds_background(stream: Any) -> bool:
+    """#1412: a live session still holding background work for its run."""
+    engine_state = getattr(stream, "engine_state", None)
+    return bool(getattr(engine_state, "live_mode", False)) and engine_background_busy(
+        engine_state
+    )
 
 
 # #1077: the push sent with a question card names the engine asking.
@@ -5765,7 +5776,10 @@ async def run_runner_with_cancel(
     deliver_error_early: Callable[[CompletedEvent, RunOutcome], bool] | None = None,
     on_started: Callable[[ResumeToken], None] | None = None,
     on_delivered: Callable[[CompletedEvent, RunOutcome], Awaitable[None]] | None = None,
+    run_since: float | None = None,
 ) -> RunOutcome:
+    """``run_since``: wall-clock dispatch time (``outbox_since``); a trigger's
+    time limit counts from it across recovery re-entries (#1412)."""
     outcome = RunOutcome()
     if running_task is not None and running_task.cancel_requested.is_set():
         # #1082: /cancel (or /new) arrived while the run was starting — its
@@ -5986,18 +6000,26 @@ async def run_runner_with_cancel(
 
             async def elapsed_deadline(task: RunningTask, limit_s: float) -> None:
                 """#1125: a trigger's ``max_elapsed_s`` — stop the run through
-                the /cancel path below, marked as a time-limit stop."""
-                await anyio.sleep(limit_s)
+                the /cancel path below, marked as a time-limit stop. #1412:
+                counted from the dispatch, so a recovery re-entry (auto-continue,
+                resend, retry) doesn't restart it. Both sides are wall clock."""
+                spent = time.time() - run_since if run_since is not None else 0.0
+                await anyio.sleep(max(0.0, limit_s - max(0.0, spent)))
                 if task.cancel_requested.is_set():
                     return
                 task.stop_reason = "max_elapsed"
-                logger.warning(
+                # #1412: closing an answered session with nothing in flight is
+                # routine; stopping work is what deserves the WARNING.
+                idle = running_task_is_idle_after_result(task)
+                task.stopped_idle = idle
+                (logger.info if idle else logger.warning)(
                     "trigger.max_elapsed.reached",
                     trigger=task.context.trigger_source if task.context else None,
                     run_id=task.context.run_id if task.context else None,
                     engine=runner.engine,
                     limit_s=limit_s,
                     live_idle=running_task_is_live_idle(task),
+                    idle=idle,
                 )
                 task.cancel_requested.set()
 
@@ -7880,8 +7902,11 @@ async def handle_message(
     # when that early path did not run or failed — from the post-return
     # flow below. ``final_delivery["sent"]`` keeps the two paths idempotent.
     final_delivery = {"sent": False}
-    # #1123: the run's triggers_runs.jsonl line is written once.
-    journal_state = {"written": False}
+    # #1123: the run's triggers_runs.jsonl line is written once. #1412: the
+    # first result's line is held while a live session still holds background
+    # work under a time limit (``deferred``), so a limit that stops that work
+    # records ``max_elapsed``; otherwise it is written when the run ends.
+    journal_state: dict[str, Any] = {"written": False, "deferred": None}
 
     def _journal(outcome: str, *, ok: bool, **fields: Any) -> None:
         if journal_state["written"] or not (context and context.trigger_source):
@@ -8051,7 +8076,16 @@ async def handle_message(
                     "total_cost_usd": (cost_usage or {}).get("total_cost_usd"),
                 },
             }
-            if not defer_journal:
+            if defer_journal:
+                pass
+            elif (
+                running_task is not None
+                and running_task.context is not None
+                and running_task.context.max_elapsed_s is not None
+                and stream_holds_background(edits.stream)
+            ):
+                journal_state["deferred"] = journal_fields
+            else:
                 _journal(**journal_fields)
         # Record session stats for /stats command
         from .session_stats import record_run as _record_stats_run
@@ -9655,6 +9689,7 @@ async def handle_message(
                 deliver_error_early=_deliver_error_early,
                 on_started=_subscribe_live_notices,
                 on_delivered=_after_run_delivered,
+                run_since=run_outbox_since,  # #1412
             )
         except Exception as exc:
             error = exc
@@ -9782,6 +9817,23 @@ async def handle_message(
                 resume=outcome.resume.value if outcome.resume else None,
                 elapsed_s=elapsed,
             )
+            # #1412: the time limit stopped the background work the held
+            # first-result line was waiting on.
+            deferred = journal_state["deferred"]
+            if (
+                deferred is not None
+                and running_task is not None
+                and running_task.stop_reason == "max_elapsed"
+                and not running_task.stopped_idle
+            ):
+                _journal(
+                    **{
+                        **deferred,
+                        "outcome": "max_elapsed",
+                        "ok": False,
+                        "elapsed_s": elapsed,
+                    }
+                )
             return
 
         if outcome.cancelled:
@@ -9834,8 +9886,10 @@ async def handle_message(
                 progress_ref=progress_ref,
                 message=final_rendered,
                 # #1125: nobody asked for this stop, so the chat is told.
+                # #1412: as a new message replacing the card — an edit of
+                # the card would not push.
                 notify=time_limit,
-                edit_ref=progress_ref,
+                edit_ref=None if time_limit else progress_ref,
                 replace_ref=progress_ref,
                 delete_tag="cancel",
                 thread_id=incoming.thread_id,
@@ -10275,3 +10329,6 @@ async def handle_message(
     finally:
         if release_reason is not None:
             _release_progress(progress_ref, reason=release_reason)
+        # #1412: a held first-result line nothing overrode (no-op if written).
+        if journal_state["deferred"] is not None:
+            _journal(**journal_state["deferred"])

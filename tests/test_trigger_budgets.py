@@ -320,7 +320,7 @@ async def test_max_elapsed_stops_the_run_and_journals_it(tmp_path, monkeypatch) 
             )
     finally:
         journal.reset_journal()
-    last = (transport.edit_calls or transport.send_calls)[-1]["message"].text
+    last = transport.send_calls[-1]["message"].text  # #1412: a new message
     assert "time limit" in last
     assert any(e["event"] == "trigger.max_elapsed.reached" for e in logs)
     (line,) = [
@@ -328,6 +328,148 @@ async def test_max_elapsed_stops_the_run_and_journals_it(tmp_path, monkeypatch) 
         for raw in (tmp_path / journal.JOURNAL_FILENAME).read_text().splitlines()
     ]
     assert line["outcome"] == "max_elapsed" and line["run_id"] == "rid"
+
+
+async def _limited_run(
+    tmp_path,
+    monkeypatch,
+    script: list[Any],
+    *,
+    limit_s: float = 0.05,
+    outbox_since: float | None = None,
+) -> tuple[FakeTransport, list[dict], list[dict]]:
+    """A cron run with a ``limit_s`` time limit: (transport, logs, journal)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    journal.init_journal(tmp_path / "untether.toml")
+    monkeypatch.setattr(bridge, "trigger_elapsed_limit", lambda engine, ctx: limit_s)
+    transport = FakeTransport()
+    runner = ScriptRunner(script, engine="pi", resume_value="s-1412")
+    cfg = ExecBridgeConfig(
+        transport=transport, presenter=MarkdownPresenter(), final_notify=True
+    )
+    ctx = RunContext(trigger_source="cron:watch", run_id="rid", max_elapsed_s=30)
+    try:
+        with capture_logs() as logs, anyio.fail_after(5):
+            await handle_message(
+                cfg,
+                runner=runner,
+                incoming=IncomingMessage(channel_id=1, message_id=10, text="go"),
+                resume_token=None,
+                context=ctx,
+                running_tasks={},
+                outbox_since=outbox_since,
+            )
+    finally:
+        journal.reset_journal()
+    path = tmp_path / journal.JOURNAL_FILENAME
+    lines = [json.loads(raw) for raw in path.read_text().splitlines()]
+    return transport, logs, lines
+
+
+def _answer(text: str = "done") -> Any:
+    from untether.model import CompletedEvent, ResumeToken
+    from untether.runners.mock import Emit
+
+    return Emit(
+        CompletedEvent(
+            engine="pi",
+            resume=ResumeToken(engine="pi", value="s-1412"),
+            ok=True,
+            answer=text,
+        )
+    )
+
+
+@pytest.mark.anyio
+async def test_time_limit_final_is_sent_not_edited(tmp_path, monkeypatch) -> None:
+    """#1412 item 8: the stop is a new message (so it pushes) that replaces
+    the card, not a silent edit of it."""
+    transport, _, _ = await _limited_run(tmp_path, monkeypatch, [Wait(anyio.Event())])
+    progress_ref = transport.send_calls[0]["ref"]
+    final = transport.send_calls[-1]
+    assert "time limit" in final["message"].text
+    assert final["options"].notify is True
+    assert final["options"].replace == progress_ref
+    assert not any("time limit" in c["message"].text for c in transport.edit_calls)
+
+
+@pytest.mark.anyio
+async def test_max_elapsed_idle_close_logs_info(tmp_path, monkeypatch) -> None:
+    """#1412 item 9: closing a session with nothing in flight is routine
+    (INFO); stopping work stays a WARNING."""
+    monkeypatch.setattr(bridge, "running_task_is_idle_after_result", lambda t: True)
+    _, logs, _ = await _limited_run(tmp_path, monkeypatch, [Wait(anyio.Event())])
+    (reached,) = [e for e in logs if e["event"] == "trigger.max_elapsed.reached"]
+    assert reached["log_level"] == "info" and reached["idle"] is True
+
+    monkeypatch.setattr(bridge, "running_task_is_idle_after_result", lambda t: False)
+    _, logs, _ = await _limited_run(
+        tmp_path / "busy", monkeypatch, [Wait(anyio.Event())]
+    )
+    (reached,) = [e for e in logs if e["event"] == "trigger.max_elapsed.reached"]
+    assert reached["log_level"] == "warning" and reached["idle"] is False
+
+
+@pytest.mark.anyio
+async def test_time_limit_on_background_hold_journals_max_elapsed(
+    tmp_path, monkeypatch
+) -> None:
+    """#1412 item 10: the answer is out but the live session still holds
+    background work, so the first-result line waits; the limit then stops
+    that work and the line reads max_elapsed."""
+    monkeypatch.setattr(bridge, "stream_holds_background", lambda stream: True)
+    transport, _, lines = await _limited_run(
+        tmp_path, monkeypatch, [_answer(), Wait(anyio.Event())], limit_s=0.3
+    )
+    assert any("done" in c["message"].text for c in transport.send_calls)
+    (line,) = lines
+    assert line["outcome"] == "max_elapsed" and line["ok"] is False
+
+
+@pytest.mark.anyio
+async def test_background_hold_that_ends_journals_the_first_result(
+    tmp_path, monkeypatch
+) -> None:
+    """#1412 item 10: a held line is written when the run ends on its own, or
+    when the limit only closes a session with nothing left in flight."""
+    monkeypatch.setattr(bridge, "stream_holds_background", lambda stream: True)
+    hold = anyio.Event()
+
+    async def release() -> None:
+        await anyio.sleep(0.1)
+        hold.set()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(release)
+        _, _, lines = await _limited_run(
+            tmp_path, monkeypatch, [_answer(), Wait(hold)], limit_s=30.0
+        )
+    (line,) = lines
+    assert line["outcome"] == "ok" and line["ok"] is True
+
+    monkeypatch.setattr(bridge, "running_task_is_idle_after_result", lambda t: True)
+    _, _, lines = await _limited_run(
+        tmp_path / "idle", monkeypatch, [_answer(), Wait(anyio.Event())], limit_s=0.3
+    )
+    (line,) = lines
+    assert line["outcome"] == "ok"
+
+
+@pytest.mark.anyio
+async def test_auto_continue_keeps_trigger_deadline(tmp_path, monkeypatch) -> None:
+    """#1412 item 12: the limit counts from the dispatch (``outbox_since``,
+    threaded through every recovery re-entry), not from this attempt."""
+    import time
+
+    _, logs, lines = await _limited_run(
+        tmp_path,
+        monkeypatch,
+        [Wait(anyio.Event())],
+        limit_s=30.0,
+        outbox_since=time.time() - 29.9,
+    )
+    assert any(e["event"] == "trigger.max_elapsed.reached" for e in logs)
+    assert lines[0]["outcome"] == "max_elapsed"
 
 
 @pytest.mark.anyio

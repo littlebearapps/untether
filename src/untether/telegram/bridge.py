@@ -183,7 +183,8 @@ def _is_cancelled_label(label: str) -> bool:
     stripped = label.strip()
     if stripped.startswith("`") and stripped.endswith("`") and len(stripped) >= 2:
         stripped = stripped[1:-1]
-    return stripped.lower() == "cancelled"
+    # #1412: a trigger's time-limit stop is a finished run too.
+    return stripped.lower() in {"cancelled", "stopped: time limit"}
 
 
 @dataclass(slots=True)
