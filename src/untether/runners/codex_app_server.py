@@ -1668,6 +1668,21 @@ class CodexAppServerRunner(CodexRunner):
         rows: list[UntetherEvent] = []
         turn = msg.result.get("turn") if isinstance(msg.result, dict) else None
         turn_id = turn.get("id") if isinstance(turn, dict) else None
+        if (
+            msg.error is None
+            and isinstance(turn_id, str)
+            and wait.turn_id not in (None, turn_id)
+        ):
+            # Review H2: the turn attributed to it wasn't its turn. That one
+            # is Codex's own from here; the named turn is the follow-up's.
+            logger.warning(
+                "codex.app_server.followup_turn_mismatch",
+                attributed=wait.turn_id,
+                answered=turn_id,
+            )
+            if state.turn_open and state.turn_id == wait.turn_id:
+                state.turn_reason, state.turn_command_uuid = "unknown", None
+            wait.turn_id, wait.started = None, False
         if msg.error is not None or not isinstance(turn_id, str):
             wait.error = msg.error.message if msg.error else "no turn id"
         elif wait.turn_id is None and state.turn_open and state.turn_id == turn_id:
@@ -1684,13 +1699,7 @@ class CodexAppServerRunner(CodexRunner):
                 command_uuid=wait.command_uuid,
             )
         else:
-            if wait.turn_id is not None and wait.turn_id != turn_id:
-                logger.warning(
-                    "codex.app_server.followup_turn_mismatch",
-                    attributed=wait.turn_id,
-                    answered=turn_id,
-                )
-            wait.turn_id = wait.turn_id or turn_id
+            wait.turn_id = turn_id
             wait.accepted = True
         _settle_start(state, wait)
         wait.done.set()
@@ -1972,7 +1981,9 @@ class CodexAppServerRunner(CodexRunner):
         state.ctx_emitted = None  # re-show % ctx for this turn
         wait = state.pending_start
         reason, command_uuid = "unknown", None
-        if wait is not None and wait.turn_id in (None, turn.id):
+        # A turn that starts while the follow-up is still unwritten is
+        # Codex's own (review H2); the answer reconciles the rest.
+        if wait is not None and wait.sent and wait.turn_id in (None, turn.id):
             wait.turn_id, wait.started = turn.id, True
             reason, command_uuid = "followup", wait.command_uuid
             _settle_start(state, wait)
@@ -2390,13 +2401,19 @@ async def start_followup(
         state.pending_start = wait
         state.followup_rids.add(rid)
 
+    def written(_rid: int) -> None:
+        # Only from here can a turn/started be this follow-up's (review H2).
+        wait.sent = True
+
     params = {
         "threadId": state.thread_id,
         "input": [{"type": "text", "text": text}],
         "clientUserMessageId": command_uuid,
     }
     try:
-        await peer.submit("turn/start", params, before_send=register)
+        await peer.submit(
+            "turn/start", params, before_send=register, after_send=written
+        )
     except CodexRpcClosed:
         if state.pending_start is wait:
             state.pending_start = None
@@ -2404,8 +2421,6 @@ async def start_followup(
         return "unsent"
     except CodexRpcWriteTimeout:
         pass  # part of it may have gone out: unconfirmed, below
-    else:
-        wait.sent = True
     with anyio.move_on_after(FOLLOWUP_RESPONSE_S):
         await wait.done.wait()
     if wait.absorbed:

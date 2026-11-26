@@ -683,3 +683,67 @@ async def test_late_answer_of_a_dropped_start_never_moves_the_current_turn(
     assert state.turn_id == "turn-3"
     [done] = _translate(runner, state, "turn/completed", _turn("turn-3", "completed"))
     assert isinstance(done, TurnEvent) and (done.phase, done.turn) == ("completed", 3)
+
+
+@pytest.mark.anyio
+async def test_turn_started_while_the_start_is_still_unwritten_is_not_the_followups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H2, the real race: the follow-up is registered but its write is
+    held (the RPC write lock), and Codex starts a turn of its own. That turn
+    is ``unknown``; Codex then steers the follow-up into it (its answer names
+    that turn), which is an absorption: one row, no turn of its own."""
+    sink = _Sink()
+    sink.gate = anyio.Event()
+    runner, state = _live_state(sink)
+    outcome: list[str] = []
+
+    async def start() -> None:
+        outcome.append(await gate.start_followup(state, "hi", command_uuid="f1"))
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(start)
+        await _wait_for(lambda: state.pending_start is not None)
+        [opened] = _translate(runner, state, "turn/started", _turn("turn-a"))
+        assert (opened.reason, opened.command_uuid) == ("unknown", None)
+        sink.gate.set()  # the write goes out now
+        await _wait_for(lambda: sink.lines)
+        rows = _answer(runner, state, sink.lines[0]["id"], "turn-a")
+    assert outcome == ["absorbed"]
+    assert [r.action.detail["absorbed_command_uuid"] for r in rows] == ["f1", "f1"]
+    [done] = _translate(runner, state, "turn/completed", _turn("turn-a", "completed"))
+    assert (done.reason, done.command_uuid) == ("unknown", None)
+
+
+@pytest.mark.anyio
+async def test_an_answer_naming_another_turn_re_labels_the_attribution() -> None:
+    """Review H2, reconcile: a turn attributed to the written follow-up was
+    not its turn (the answer names another). The open one is no longer the
+    follow-up's, and the named turn is, when it starts."""
+    sink = _Sink()
+    runner, state = _live_state(sink)
+    outcome: list[str] = []
+
+    async def start() -> None:
+        outcome.append(await gate.start_followup(state, "hi", command_uuid="f1"))
+
+    with capture_logs() as logs:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(start)
+            await _wait_for(lambda: sink.lines)
+            [first] = _translate(runner, state, "turn/started", _turn("turn-a"))
+            assert first.command_uuid == "f1"  # written: tentatively its turn
+            _answer(runner, state, sink.lines[0]["id"], "turn-b")
+        [done_a] = _translate(
+            runner, state, "turn/completed", _turn("turn-a", "completed")
+        )
+        [started_b] = _translate(runner, state, "turn/started", _turn("turn-b"))
+    assert outcome == ["started"]
+    assert (done_a.reason, done_a.command_uuid) == ("unknown", None)
+    assert (started_b.reason, started_b.command_uuid) == ("followup", "f1")
+    assert state.pending_start is None
+    assert [
+        e["answered"]
+        for e in logs
+        if e["event"] == "codex.app_server.followup_turn_mismatch"
+    ] == ["turn-b"]

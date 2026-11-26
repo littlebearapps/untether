@@ -155,12 +155,14 @@ class CodexRpcPeer:
         params: dict[str, Any] | None = None,
         *,
         before_send: Callable[[int], None] | None = None,
+        after_send: Callable[[int], None] | None = None,
     ) -> int:
         """Write a request; returns its id without waiting for the answer.
 
         ``before_send(rid)`` runs before the write, so a caller can register
         a waiter the reader can't miss (#964: the response may be read
-        before ``submit`` returns)."""
+        before ``submit`` returns). ``after_send(rid)`` runs as soon as the
+        write is done, before ``submit`` returns."""
         rid = self._next_id
         self._next_id += 1
         message: dict[str, Any] = {"method": method, "id": rid}
@@ -174,6 +176,8 @@ class CodexRpcPeer:
         except BaseException:
             self.pending.pop(rid, None)
             raise
+        if after_send is not None:
+            after_send(rid)
         return rid
 
     async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
