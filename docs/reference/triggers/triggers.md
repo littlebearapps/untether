@@ -1091,8 +1091,8 @@ tail -n 20 ~/.untether/triggers_runs.jsonl | jq -c '{trigger_id, outcome, cost_u
 
 `/config` → **⏰ Triggers** (`config:tg`) lists every cron and webhook configured for the current chat ([#271](https://github.com/littlebearapps/untether/issues/271) Tier 2):
 
-- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, `model=` / `effort=` / `mode=` when set, last-fired relative time
-- **Webhooks**: id, path, auth scheme, project, engine, `model=` / `effort=` / `mode=` when set ([#1122](https://github.com/littlebearapps/untether/issues/1122)), last-fired
+- **Crons**: id, human-readable `describe_cron(schedule, timezone)`, project, engine, `model=` / `effort=` / `mode=` when set, `turns=` / `budget=$` / `limit=Ns` / `quiet` when set ([#1412](https://github.com/littlebearapps/untether/issues/1412)), last-fired relative time
+- **Webhooks**: id, path, auth scheme, project, engine, `model=` / `effort=` / `mode=` when set ([#1122](https://github.com/littlebearapps/untether/issues/1122)), `turns=` / `budget=$` / `limit=Ns` / `quiet` when set ([#1412](https://github.com/littlebearapps/untether/issues/1412)), last-fired
 
 The engine column shows the trigger's own `engine` setting, not the engine it
 resolves to. The page also shows the status (active or paused) and total cron

@@ -2833,7 +2833,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     if has_sub_usage:
         su_label = "on" if (su if su is not None else su_default) else "off"
         lines.append(f"<b>Subscription usage</b>: {su_label}")
-        lines.append("  Show how much of your 5h/weekly quota is used.")
+        lines.append("  Show how much of your plan's usage limit is used.")
         lines.append("")
 
     # Budget section
@@ -3066,7 +3066,8 @@ _TRIGGER_LIST_CAP = 10
 
 def _trigger_run_option_segs(trigger: Any) -> str:
     """``model=`` / ``effort=`` / ``mode=`` segments for a cron or webhook row,
-    only for the options it sets (#743, #1122). Free-form, so escaped."""
+    then the run budgets (#1125) and quiet end (#1220), only for the options
+    it sets (#743, #1122, #1412). Free-form, so escaped."""
     segs = ""
     if trigger.model:
         model = html.escape(_truncate_field(redact_url_secrets(trigger.model)))
@@ -3075,6 +3076,14 @@ def _trigger_run_option_segs(trigger: Any) -> str:
         segs += f"effort=<i>{html.escape(trigger.reasoning)}</i> · "
     if trigger.permission_mode:
         segs += f"mode=<i>{html.escape(trigger.permission_mode)}</i> · "
+    if trigger.max_turns is not None:
+        segs += f"turns=<i>{trigger.max_turns}</i> · "
+    if trigger.max_budget_usd is not None:
+        segs += f"budget=<i>${trigger.max_budget_usd:.2f}</i> · "
+    if trigger.max_elapsed_s is not None:
+        segs += f"limit=<i>{trigger.max_elapsed_s}s</i> · "
+    if trigger.quiet_unless_output:
+        segs += "<i>quiet</i> · "
     return segs
 
 
