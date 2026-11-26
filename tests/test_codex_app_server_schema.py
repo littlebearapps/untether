@@ -214,7 +214,7 @@ def test_every_used_notification_and_item_has_a_struct() -> None:
 
 
 def test_live_transcripts_decode() -> None:
-    assert len(LIVE_FIXTURES) == 4
+    assert len(LIVE_FIXTURES) == 5
     decoded: dict[str, int] = {}
     for path in LIVE_FIXTURES:
         sent: dict = {}
