@@ -455,7 +455,8 @@
     "info callback.answered command=\"claude_control\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
     "info callback.dispatch command=\"claude_control\" +[chat_id,logger_name]",
     "info claude_control.sent approved=true request_id=\"req-bash-1\" tool_name=\"Bash\" +[logger_name]",
-    "info control_response.sent approved=true channel=\"pipe\" permission_mode=\"default\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" +[logger_name]"
+    "info control_response.sent approved=true channel=\"pipe\" permission_mode=\"default\" request_id=\"req-bash-1\" session_id=\"golden-session-1\" tool_name=\"Bash\" +[logger_name]",
+    "info progress_edits.keyboard_retired request_id=\"req-bash-1\" +[action_id,logger_name]"
    ],
    "registry": {
     "handled": [

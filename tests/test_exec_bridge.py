@@ -15753,3 +15753,145 @@ async def test_1370_fresh_run_notes_its_session_for_the_token_ledger(
     )
     entry = get_session_cost_ledger()._entries.get(f"{CODEX_ENGINE}:s-1370", {})
     assert bool(entry.get("started_here")) is not resumed
+
+
+# ---------------------------------------------------------------------------
+# #1411: an answered request's buttons go at the tap, not with the CLI's next
+# frame (after a Deny that frame can be the final)
+# ---------------------------------------------------------------------------
+
+
+def _req_action_1411(request_id: str, action_id: str, *, phase: str = "started"):
+    from untether.model import Action, ActionEvent
+
+    return ActionEvent(
+        engine="claude",
+        action=Action(
+            id=action_id,
+            kind="warning",
+            title=f"Permission Request [CanUseTool] - tool: WebFetch ({request_id})",
+            detail={
+                "request_id": request_id,
+                "request_type": "CanUseTool",
+                "tool_name": "WebFetch",
+                "inline_keyboard": {
+                    "buttons": [
+                        [
+                            {
+                                "text": "✅ Approve",
+                                "callback_data": f"claude_control:approve:{request_id}",
+                            },
+                            {
+                                "text": "❌ Deny",
+                                "callback_data": f"claude_control:deny:{request_id}",
+                            },
+                        ]
+                    ]
+                },
+            },
+        ),
+        phase=phase,  # type: ignore[arg-type]
+    )
+
+
+def _kb_data_1411(call: dict) -> list[str]:
+    rows = call["message"].extra.get("reply_markup", {}).get("inline_keyboard", [])
+    return [str(b.get("callback_data")) for row in rows for b in row]
+
+
+async def _settle_1411() -> None:
+    for _ in range(20):
+        await anyio.lowlevel.checkpoint()
+
+
+def _edits_1411(transport: FakeTransport) -> ProgressEdits:
+    from untether.telegram.bridge import TelegramPresenter
+
+    edits = _make_edits(transport, TelegramPresenter(), engine="claude")  # type: ignore[arg-type]
+    edits._min_render_interval = 0.0
+    return edits
+
+
+@pytest.mark.anyio
+async def test_1411_deny_retires_keyboard_without_engine_frame() -> None:
+    """The live C6 Deny: nothing arrives from the CLI after the tap until the
+    final, so the denied request's buttons must go at the tap."""
+    from untether.runner_bridge import retire_answered_keyboard
+
+    transport = FakeTransport()
+    edits = _edits_1411(transport)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits.run)
+        await edits.on_event(_req_action_1411("rq-b", "claude.control.2"))
+        await _settle_1411()
+        assert "claude_control:deny:rq-b" in _kb_data_1411(transport.edit_calls[-1])
+        with structlog.testing.capture_logs() as logs:
+            assert retire_answered_keyboard("rq-b") is True
+        await _settle_1411()  # no engine event fed
+        edits.signal_send.close()
+    assert not any("rq-b" in d for d in _kb_data_1411(transport.edit_calls[-1]))
+    (hit,) = [e for e in logs if e.get("event") == "progress_edits.keyboard_retired"]
+    assert hit["request_id"] == "rq-b" and hit["action_id"] == "claude.control.2"
+
+
+@pytest.mark.anyio
+async def test_1411_retire_swaps_to_next_request_without_engine_frame() -> None:
+    """Approve with request B queued: 👇 moves to B at the tap."""
+    from untether.runner_bridge import retire_answered_keyboard
+
+    transport = FakeTransport()
+    edits = _edits_1411(transport)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits.run)
+        await edits.on_event(_req_action_1411("rq-a", "claude.control.1"))
+        await edits.on_event(_req_action_1411("rq-b", "claude.control.2"))
+        await _settle_1411()
+        assert "claude_control:approve:rq-a" in _kb_data_1411(transport.edit_calls[-1])
+        assert retire_answered_keyboard("rq-a") is True
+        await _settle_1411()
+        edits.signal_send.close()
+    data = _kb_data_1411(transport.edit_calls[-1])
+    assert "claude_control:approve:rq-b" in data
+    assert not any("rq-a" in d for d in data)
+
+
+@pytest.mark.anyio
+async def test_1411_retire_unknown_is_noop() -> None:
+    from untether.runner_bridge import retire_answered_keyboard
+
+    edits = _edits_1411(FakeTransport())
+    await edits.on_event(_req_action_1411("rq-a", "claude.control.1"))
+    seq = edits.event_seq
+    with structlog.testing.capture_logs() as logs:
+        assert retire_answered_keyboard("rq-unknown") is False
+    assert edits.event_seq == seq
+    assert not [e for e in logs if e.get("event") == "progress_edits.keyboard_retired"]
+    # A second retire of the same request is a no-op too.
+    assert retire_answered_keyboard("rq-a") is True
+    assert retire_answered_keyboard("rq-a") is False
+
+
+@pytest.mark.anyio
+async def test_1411_late_reconcile_after_retire_is_harmless() -> None:
+    """The runner's #229 reconcile still completes the action on the next
+    frame; after a retire that changes nothing about the keyboard."""
+    from untether.runner_bridge import retire_answered_keyboard
+
+    transport = FakeTransport()
+    edits = _edits_1411(transport)
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(edits.run)
+        await edits.on_event(_req_action_1411("rq-a", "claude.control.1"))
+        await edits.on_event(_req_action_1411("rq-b", "claude.control.2"))
+        await _settle_1411()
+        assert retire_answered_keyboard("rq-a") is True
+        await _settle_1411()
+        after_retire = _kb_data_1411(transport.edit_calls[-1])
+        await edits.on_event(
+            _req_action_1411("rq-a", "claude.control.1", phase="completed")
+        )
+        await _settle_1411()
+        edits.signal_send.close()
+    assert "claude_control:approve:rq-b" in after_retire
+    assert _kb_data_1411(transport.edit_calls[-1]) == after_retire
+    assert edits.tracker._actions["claude.control.1"].completed

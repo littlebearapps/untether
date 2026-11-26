@@ -236,6 +236,44 @@ def clear_ask_action_model(request_id: str) -> None:
     _ASK_ACTION_MODEL_TS.pop(request_id, None)
 
 
+# ---------------------------------------------------------------------------
+# #1411: answered-request keyboard registry
+# ---------------------------------------------------------------------------
+# The runner's #229 reconcile drops an answered request's keyboard only when
+# the CLI sends its next frame — seconds later, or (after a Deny) not before
+# the final. The tap handler retires it in the model instead (the #709
+# pattern: a separate edit would be repainted by the next heartbeat).
+
+_KEYBOARD_ACTIONS: dict[str, tuple[ProgressEdits, str]] = {}
+_KEYBOARD_ACTIONS_TS: dict[str, float] = {}
+
+
+def retire_answered_keyboard(request_id: str) -> bool:
+    """Drop *request_id*'s buttons from its progress card now and repaint.
+
+    The next request's buttons (if any) take their place at once. False when
+    the request has no tracked keyboard (already retired, or not rendered by
+    a progress card)."""
+    _KEYBOARD_ACTIONS_TS.pop(request_id, None)
+    entry = _KEYBOARD_ACTIONS.pop(request_id, None)
+    if entry is None:
+        return False
+    edits, action_id = entry
+    detail = edits.tracker.action_detail(action_id)
+    if not detail or "inline_keyboard" not in detail:
+        return False
+    stripped = {k: v for k, v in detail.items() if k != "inline_keyboard"}
+    if not edits.tracker.update_action(action_id, detail=stripped):
+        return False
+    edits._bump_heartbeat()
+    logger.info(
+        "progress_edits.keyboard_retired",
+        request_id=request_id,
+        action_id=action_id,
+    )
+    return True
+
+
 # Outline message cleanup registry.
 # Maps session_id → (transport, list of outline refs).
 # Populated by ProgressEdits._send_outline(), consumed by
@@ -306,6 +344,11 @@ def sweep_stale_registries(now: float | None = None) -> int:
         if now - ts > _REGISTRY_TTL_SECONDS:
             _ASK_ACTION_MODEL.pop(rid, None)
             _ASK_ACTION_MODEL_TS.pop(rid, None)
+            pruned += 1
+    for rid, ts in list(_KEYBOARD_ACTIONS_TS.items()):
+        if now - ts > _REGISTRY_TTL_SECONDS:
+            _KEYBOARD_ACTIONS.pop(rid, None)
+            _KEYBOARD_ACTIONS_TS.pop(rid, None)
             pruned += 1
     if pruned:
         logger.info("runner_bridge.registries_swept", pruned=pruned)
@@ -5270,6 +5313,16 @@ class ProgressEdits:
             _ask_rid = evt.action.detail.get("request_id")
             if isinstance(_ask_rid, str) and _ask_rid:
                 register_ask_action_model(_ask_rid, self.tracker, str(evt.action.id))
+        # #1411: any request's buttons can be retired by its tap handler.
+        if (
+            isinstance(evt, ActionEvent)
+            and evt.phase == "started"
+            and evt.action.detail.get("inline_keyboard")
+        ):
+            _kb_rid = evt.action.detail.get("request_id")
+            if isinstance(_kb_rid, str) and _kb_rid:
+                _KEYBOARD_ACTIONS[_kb_rid] = (self, str(evt.action.id))
+                _KEYBOARD_ACTIONS_TS[_kb_rid] = time.monotonic()
         # #929: a keyboard action reaching the run-level edits after the run's
         # final was delivered (``_finalizing``) has no visible host — the
         # turn router took no turn for it (a background agent asking while

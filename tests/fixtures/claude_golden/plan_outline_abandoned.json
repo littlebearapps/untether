@@ -377,11 +377,13 @@
    "logs": [
     "debug callback.executed command=\"claude_control\" +[chat_id,logger_name]",
     "debug claude.plan.not_approved reason=\"telegram_procedural\" request_id=\"req-epm-1\" +[logger_name,plan_source,rejected]",
+    "debug transport.edit_message +[channel_id,logger_name,message_id,rendered]",
     "info callback.answered command=\"claude_control\" early=true has_toast=true +[chat_id,latency_ms,logger_name,queue_wait_ms,total_ms]",
     "info callback.dispatch command=\"claude_control\" +[chat_id,logger_name]",
     "info claude_control.sent action=\"discuss\" request_id=\"req-epm-1\" tool_name=\"ExitPlanMode\" +[logger_name]",
     "info control_response.sent approved=false channel=\"pipe\" permission_mode=\"plan\" request_id=\"req-epm-1\" session_id=\"golden-session-1\" tool_name=\"ExitPlanMode\" +[logger_name]",
-    "info outline_pending.set session_id=\"golden-session-1\" +[logger_name]"
+    "info outline_pending.set session_id=\"golden-session-1\" +[logger_name]",
+    "info progress_edits.keyboard_retired request_id=\"req-epm-1\" +[action_id,logger_name]"
    ],
    "registry": {
     "discuss_feedback_refs": {
@@ -435,6 +437,23 @@
    ],
    "step": "do:tap data=claude_control:discuss:req-epm-1",
    "telegram": [
+    {
+     "entities": [
+      "code@302+32"
+     ],
+     "id": 1,
+     "keyboard": [
+      [
+       "cancel => untether:cancel"
+      ]
+     ],
+     "op": "edit",
+     "text": "working · claude · <t> · step 2\n\n▸ tool: ExitPlanMode\n▸ Permission Request [CanUseTool] - tool: ExitPlanMode\nApproving lets Claude carry out this plan without further prompts. Plan mode resumes when this reply ends, or after the background agents it starts have finished.\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
+    },
+    {
+     "id": 2,
+     "op": "delete"
+    },
     {
      "chat": 123,
      "id": 3,
@@ -520,10 +539,6 @@
      ],
      "op": "edit",
      "text": "working · claude · <t> · step 2\n\n✗ tool: ExitPlanMode\n✓ Permission resolved\n\n🏷 claude-golden-1 · plan\n\n↩️ claude --resume golden-session-1"
-    },
-    {
-     "id": 2,
-     "op": "delete"
     }
    ]
   },
