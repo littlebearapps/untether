@@ -101,6 +101,50 @@ def test_decide_mode_truth_table(
         assert not decision.bypass
 
 
+_FOREIGN = (".agents/hooks.json",)
+
+
+def test_decide_foreign_trusted_bypasses_gated() -> None:
+    """#1032: a matching trust record lifts only the foreign refusal; the
+    gate is still required."""
+    gate = GateFacts(
+        installed=True, foreign=_FOREIGN, foreign_trusted=True, listening=True
+    )
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.bypass and decision.gated and decision.refusal is None
+
+
+def test_decide_untrusted_foreign_still_refuses() -> None:
+    gate = GateFacts(installed=True, foreign=_FOREIGN, listening=True)
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.block == agy.GATE_FOREIGN_BLOCK and not decision.bypass
+
+
+@pytest.mark.parametrize(
+    ("facts", "block"),
+    [
+        (
+            {"self_protect": "/u", "listening": True},
+            agy.GATE_SELF_PROTECT_BLOCK,
+        ),
+        ({"problem": "x", "listening": True}, agy.GATE_NOT_READY_BLOCK),
+        ({"listening": False}, agy.GATE_NOT_READY_BLOCK),
+    ],
+    ids=["self_protect", "problem", "not_listening"],
+)
+def test_decide_trust_never_beats_other_refusals(
+    facts: dict[str, Any], block: str
+) -> None:
+    """test_decide_self_protect_beats_trust / _problem_beats_trust /
+    _not_listening_beats_trust."""
+    gate = GateFacts(installed=True, foreign=_FOREIGN, foreign_trusted=True, **facts)
+    decision = decide_antigravity_mode("ask", gate)
+    assert decision.block == block and not decision.bypass
+    # Trust is never consulted outside Ask me either.
+    for mode in ("workspace", "plan"):
+        assert not decide_antigravity_mode(mode, gate).bypass
+
+
 def test_bypass_only_for_full_or_ready_attended_ask() -> None:
     """Risk 1 (crown jewel): without a ready-gate decision from run_impl,
     build_args never bypasses for Ask me — it fails closed to Workspace."""

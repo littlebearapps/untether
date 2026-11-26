@@ -118,6 +118,92 @@ def test_foreign_hook_groups_recorded() -> None:
     assert result.foreign_sources == ("<proj>/.agents/hooks.json",)
 
 
+def test_evaluate_hooks_records_foreign_groups_and_pretooluse() -> None:
+    """#1032: the foreign groups' definitions are kept (the trust fingerprint
+    hashes them) and every source with a PreToolUse action, enabled or not,
+    is named (never trustable, D1). Kept on a failed check too."""
+    extra = [
+        {
+            "name": "lint",
+            "enabled": True,
+            "source": "/p/.agents/hooks.json",
+            "actions": [{"event": "Stop", "type": "command", "command": "x"}],
+        },
+        {
+            "name": "sneaky",
+            "enabled": False,
+            "source": "~/.gemini/settings.json",
+            "actions": [{"event": "PreToolUse", "matcher": "*", "command": "y"}],
+        },
+    ]
+    for data in (
+        hooks_listing(extra_groups=extra),
+        hooks_listing(enabled=False, extra_groups=extra),
+    ):
+        result = gate_precheck.evaluate_hooks(_groups(data), wait_s=900)
+        assert [g.name for g in result.foreign_groups] == ["lint", "sneaky"]
+        assert result.foreign_pretooluse == ("~/.gemini/settings.json",)
+        assert gate_plugin.PLUGIN_NAME not in {g.name for g in result.foreign_groups}
+
+
+@pytest.mark.anyio
+async def test_check_keeps_foreign_groups(
+    tmp_path: Path, probe: dict[str, Any]
+) -> None:
+    install_plugin()
+    probe["data"] = hooks_listing(
+        extra_groups=[
+            {
+                "name": "lint",
+                "enabled": True,
+                "source": "/p/.agents/hooks.json",
+                "actions": [{"event": "PreToolUse", "command": "x"}],
+            }
+        ]
+    )
+    result = await gate_precheck.check(AntigravityRunner(), tmp_path)
+    assert result.ok
+    assert [g.name for g in result.foreign_groups] == ["lint"]
+    assert result.foreign_pretooluse == ("/p/.agents/hooks.json",)
+
+
+@pytest.mark.anyio
+async def test_user_mcp_digest_cached_with_stat_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1032: the digest of ``agy mcp list``'s stdout is kept beside the
+    bool, cached per (agy, version, stat of the user mcp_config.json); a
+    failed listing is never cached and has no digest."""
+    outs: list[str | None] = ["fs  stdio  enabled  npx fs\n"]
+    calls: list[int] = []
+
+    async def listing(runner: Any) -> str | None:
+        calls.append(1)
+        return outs[0]
+
+    monkeypatch.setattr(gate_precheck, "_probe_mcp", listing)
+    runner = AntigravityRunner()
+    first = await gate_precheck.user_mcp_digest(runner)
+    assert first is not None and len(first) == 64
+    assert await gate_precheck.user_mcp_digest(runner) == first
+    assert await gate_precheck.user_mcp_configured(runner) is True
+    assert len(calls) == 1
+    # The stat of the file is in the key: an edit re-lists.
+    mcp = antigravity_scan.user_config_dir() / "mcp_config.json"
+    mcp.parent.mkdir(parents=True, exist_ok=True)
+    mcp.write_text('{"mcpServers": {}}')
+    outs[0] = "No MCP servers configured.\n"
+    assert await gate_precheck.user_mcp_digest(runner) == gate_precheck.MCP_NONE
+    assert await gate_precheck.user_mcp_configured(runner) is False
+    assert len(calls) == 2
+    mcp.write_text('{"mcpServers": {"a": {}}}')
+    outs[0] = None
+    assert await gate_precheck.user_mcp_digest(runner) is None
+    assert await gate_precheck.user_mcp_configured(runner) is True
+    assert await gate_precheck.user_mcp_digest(runner) is None
+    assert len(calls) == 5  # failures aren't cached
+
+
 @pytest.mark.anyio
 async def test_not_installed_never_runs_agy(
     tmp_path: Path, probe: dict[str, Any]
