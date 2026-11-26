@@ -1430,9 +1430,11 @@ def build_runner(config: EngineConfig, config_path: Path) -> Runner:
     # #964: steer needs app-server; exec keeps "Steer isn't supported".
     codex_app_server.APP_SERVER_ACTIVE = app_server
     if app_server:
-        return codex_app_server.CodexAppServerRunner(
+        runner = codex_app_server.CodexAppServerRunner(
             codex_cmd=codex_cmd, extra_args=extra_args
         )
+        runner.keep_live = True  # #964-3b: live sessions (per run, per settings)
+        return runner
     return CodexRunner(codex_cmd=codex_cmd, extra_args=extra_args, title=title)
 
 

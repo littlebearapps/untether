@@ -705,6 +705,32 @@ class AppServerRunState(CodexRunState):
     # bridge's stall monitor as an expected wait (``_has_pending_wakeup``)
     # and its countdown.
     live_wakeups: dict[str, float] = field(default_factory=dict)
+    # #964-3b live session (the registry entry is this state, keyed by thread
+    # in ``_RUNS_BY_THREAD``). ``lock`` serialises a follow-up write against
+    # a close; ``spawn_options`` / ``spawn_cwd`` are compared by the bridge's
+    # follow-up path (#996); ``live_close_reason`` / ``live_exit_cause`` are
+    # duck-typed by the bridge. Idle grace and cap: ``[watchdog]``
+    # ``post_result_limbo_grace`` / ``live_session_max_s`` (D11).
+    lock: anyio.Lock = field(default_factory=anyio.Lock)
+    spawn_options: Any = None
+    spawn_cwd: Path | None = None
+    spawned_at: float = field(default_factory=time.monotonic)
+    idle_grace_s: float = 60.0
+    live_max_s: float = 14400.0
+    idle_since: float | None = None
+    closed_at: float | None = None
+    abs_cap_deferred: bool = False
+    steer_closed: bool = False
+    live_close_reason: str | None = None
+    live_exit_cause: str | None = None
+    # A compact follow-up's turn (``thread/compact/start``) is open.
+    turn_compact: bool = False
+    # §16 item 6: the trust Codex applied at spawn (``_trust_view``; writable
+    # tiers only), re-read before each follow-up, and the waiters of those
+    # re-reads by request id (kept until answered: a late answer is dropped).
+    spawn_trust: tuple[Any, ...] | None = None
+    read_waits: dict[int, _ReadWait] = field(default_factory=dict)
+    listeners: list[Any] = field(default_factory=list)
 
     # Duck-typed by the stall watchdogs (``runner._approval_pending``, the
     # bridge's ``_has_pending_approval``): Codex is waiting on the user.
@@ -741,6 +767,32 @@ class _StartWait:
     started: bool = False
     error: str | None = None
     done: anyio.Event = field(default_factory=anyio.Event)
+    # #964-3b: ``thread/compact/start`` (its answer is ``{}``, no turn id).
+    compact: bool = False
+    # When it was registered: a start whose turn never comes expires.
+    at: float = field(default_factory=time.monotonic)
+
+
+@dataclass(slots=True)
+class _ReadWait:
+    """A ``config/read`` sent from outside the reader (§16 item 6)."""
+
+    result: Any = None
+    error: str | None = None
+    done: anyio.Event = field(default_factory=anyio.Event)
+
+
+def _trust_view(cwd: str, result: Any) -> tuple[Any, ...]:
+    """What the spawn's sandbox decision rests on, from a ``config/read``
+    result: the ``trust_level`` of the ``[projects]`` entry Codex selects for
+    ``cwd`` (#1408 lookup and repo root), its ``sandbox_mode`` and model."""
+    config = result.get("config") if isinstance(result, dict) else None
+    config = config if isinstance(config, dict) else {}
+    entry = selected_project_entry(
+        config.get("projects"), cwd, git_repo_root(Path(cwd))
+    )
+    level = entry.get("trust_level") if isinstance(entry, dict) else None
+    return (level, config.get("sandbox_mode"), _config_model(result))
 
 
 def _settle_start(state: AppServerRunState, wait: _StartWait) -> None:
@@ -778,13 +830,19 @@ class CodexAppServerRunner(CodexRunner):
     transport = "app-server"
     # #1412 item 1: the watchdogs read ``awaiting_user_approval``.
     _EXPOSE_ENGINE_STATE = True
-    # #964-3a: keep the process after the first turn. Off: 964-3b turns it
-    # on per run (``[watchdog] live_sessions``, attended runs only).
+    # #964: this runner may keep a run's process after its first turn (a
+    # live session). ``codex.build_runner`` turns it on for the app-server
+    # transport; each run then decides (``build_args``: ``[watchdog]
+    # live_sessions``, attended runs only).
     keep_live = False
     # Instance-tunable for tests.
     exit_grace_s = _EXIT_GRACE_S
     write_timeout_s = WRITE_TIMEOUT_S
     interrupt_bound_s = _INTERRUPT_BOUND_S
+    # #964-3b lifecycle: how often a live run checks its timers, and how long
+    # past ``live_session_max_s`` a running turn may finish (#887's grace).
+    live_poll_s = 1.0
+    abs_cap_turn_grace_s = 1800.0
 
     async def run_impl(
         self, prompt: str, resume: ResumeToken | None
@@ -814,7 +872,6 @@ class CodexAppServerRunner(CodexRunner):
             factory=EventFactory(ENGINE),
             prompt=prompt,
             manual_compact=resume is not None and _is_compact(prompt),
-            live_mode=self.keep_live,
         )
 
     def build_args(
@@ -831,6 +888,14 @@ class CodexAppServerRunner(CodexRunner):
         state.sandbox = state.tier.sandbox
         state.check_trust = state.sandbox != "read-only"
         state.cwd = str(get_run_base_dir() or Path.cwd())
+        # #964-3b: only an attended run on a live-capable runner goes live
+        # (D5: a cron/webhook run's ``never`` policy must not take a chat
+        # follow-up); ``[watchdog] live_sessions = false`` keeps per-run (D1).
+        enabled, state.idle_grace_s, state.live_max_s = _live_settings()
+        state.live_mode = self.keep_live and enabled and state.unattended is None
+        if state.live_mode:
+            state.spawn_options = run_options
+            state.spawn_cwd = get_run_base_dir()  # #996
         args = [*self.extra_args, "app-server", "--listen", "stdio://"]
         state.argv = list(args)
         return args
@@ -856,6 +921,7 @@ class CodexAppServerRunner(CodexRunner):
         # Stdin stays open. Only *write* initialize: the base starts reading
         # stdout after this returns, so nothing may wait for an answer here.
         state.proc = proc
+        state.spawned_at = time.monotonic()
         state.peer = CodexRpcPeer(
             proc.stdin.send,
             write_timeout=self.write_timeout_s,
@@ -905,14 +971,36 @@ class CodexAppServerRunner(CodexRunner):
         peer: CodexRpcPeer = state.peer
         # #964-3a: a live run keeps reading after its first turn.
         stream.followup_turns = state.live_mode
+        cancelled = False
+        idle_at_eof = False
+        next_tick = time.monotonic() + self.live_poll_s
         try:
+            # A run that ended before any turn (a refused thread/resume, an
+            # unreadable result) has no session to keep: it ends as per-run.
             while state.stopped is None and (
-                state.live_mode or not stream.did_emit_completed
+                not stream.did_emit_completed
+                or (state.live_mode and state.completed_turns > 0)
             ):
+                line: bytes | None = None
                 try:
-                    line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
+                    # #964-3b: a live run's lifecycle runs between reads, on
+                    # its own deadline whether or not frames keep arriving
+                    # (one reader; a cancelled read loses nothing: the
+                    # buffered stream keeps a part-read line).
+                    with anyio.move_on_after(
+                        max(0.0, next_tick - time.monotonic())
+                        if state.live_mode
+                        else None
+                    ):
+                        line = await state.reader.receive_until(b"\n", _MAX_LINE_BYTES)
                 except (anyio.IncompleteRead, anyio.ClosedResourceError):
                     break
+                if state.live_mode and time.monotonic() >= next_tick:
+                    next_tick = time.monotonic() + self.live_poll_s
+                    if await self._live_tick(state):
+                        break
+                if line is None:
+                    continue
                 try:
                     state.inbound = await peer.feed(line)
                     # A server request yields no message, but its row does.
@@ -941,6 +1029,7 @@ class CodexAppServerRunner(CodexRunner):
                             await peer.submit(method, params)
                 except (CodexRpcClosed, CodexRpcWriteTimeout) as exc:
                     self._stop(state, exc)
+            idle_at_eof = _is_idle(state)
             if state.turn_open and state.completed_turns:
                 # A later turn the process never finished (EOF / exit).
                 yield self._turn_completed_event(
@@ -949,6 +1038,7 @@ class CodexAppServerRunner(CodexRunner):
         except (anyio.get_cancelled_exc_class(), GeneratorExit):
             # /cancel: the bridge cancelled the run (at a read) or closed this
             # generator (at a yield). Stop the turn natively, then re-raise.
+            cancelled = True
             await self._interrupt(state)
             raise
         finally:
@@ -970,6 +1060,57 @@ class CodexAppServerRunner(CodexRunner):
                     thread_id=state.thread_id,
                     pid=getattr(state.proc, "pid", None),
                 )
+            if state.live_mode and gone:
+                with anyio.CancelScope(shield=True), anyio.move_on_after(5):
+                    await _live_ended(state, died=idle_at_eof and not cancelled)
+
+    async def _live_tick(self, state: AppServerRunState) -> bool:
+        """#964-3b: one lifecycle check of a live run, between reads. True
+        ends the read loop (a close the process didn't honour in the exit
+        grace: teardown escalates). Idle (no turn, no follow-up pending, no
+        waiting flag) for ``idle_grace_s`` → ``idle_no_tasks``;
+        ``live_max_s`` from spawn → ``abs_cap``, deferred to the turn
+        boundary for at most ``abs_cap_turn_grace_s`` (#887)."""
+        now = time.monotonic()
+        if state.closing:
+            return (
+                state.closed_at is not None
+                and now - state.closed_at > self.exit_grace_s
+            )
+        if state.lock.locked():
+            # A follow-up is being written and its answer is read by this
+            # task: waiting for the lock here would stall both.
+            return False
+        _expire_stale_start(state, now)
+        over = now - state.spawned_at - state.live_max_s
+        if state.live_max_s > 0 and over >= 0:
+            busy = not _is_idle(state)
+            if not busy or over >= self.abs_cap_turn_grace_s:
+                await close_live_session(
+                    state.thread_id or "",
+                    "abs_cap",
+                    notice=busy,
+                    only_if_idle=not busy,
+                )
+                return False
+            if not state.abs_cap_deferred:
+                state.abs_cap_deferred = True
+                logger.info(
+                    "codex.live_session.abs_cap_deferred",
+                    session_id=state.thread_id,
+                    cap_s=state.live_max_s,
+                    grace_s=self.abs_cap_turn_grace_s,
+                )
+        if not _is_idle(state) or state.waiting:
+            state.idle_since = None  # a turn, a follow-up or an approval
+            return False
+        if state.idle_since is None:
+            state.idle_since = now
+        elif now - state.idle_since >= state.idle_grace_s:
+            await close_live_session(
+                state.thread_id or "", "idle_no_tasks", only_if_idle=True
+            )
+        return False
 
     @staticmethod
     def _end_run(state: AppServerRunState) -> None:
@@ -1611,8 +1752,19 @@ class CodexAppServerRunner(CodexRunner):
             # #964: the steer's own answer; never the run's error.
             self._on_steer_response(msg, state)
             return []
-        if msg.method == "turn/start" and msg.id in state.followup_rids:
-            # A follow-up's answer: never the run's error, never the turn id.
+        if msg.method == "turn/interrupt":
+            # #964-3b: a live /cancel's interrupt; its turn/completed ends it.
+            return []
+        read = state.read_waits.pop(msg.id, None)  # type: ignore[arg-type]
+        if read is not None:
+            # §16 item 6: a follow-up's trust re-read, never the handshake's.
+            read.result = msg.result
+            read.error = msg.error.message if msg.error is not None else None
+            read.done.set()
+            return []
+        if msg.id in state.followup_rids:
+            # A follow-up's answer (turn/start, or thread/compact/start for
+            # an injected /compact): never the run's error, never the turn id.
             state.followup_rids.discard(msg.id)  # type: ignore[arg-type]
             wait = state.pending_start
             if wait is not None and msg.id == wait.rid:
@@ -1640,6 +1792,7 @@ class CodexAppServerRunner(CodexRunner):
             case "config/read":
                 if state.check_trust:
                     self._decide_sandbox(state, msg.result)
+                    state.spawn_trust = _trust_view(state.cwd, msg.result)
                 state.config_model = _config_model(msg.result)
                 self._open_thread(state, resume)
             case "thread/list":
@@ -1688,6 +1841,15 @@ class CodexAppServerRunner(CodexRunner):
         attributed to the follow-up) or, through ``start_or_steer_turn``, a
         turn already running for someone else (absorbed: one row, no turn)."""
         rows: list[UntetherEvent] = []
+        if wait.compact:
+            # thread/compact/start answers ``{}``: its turn is the next one.
+            if msg.error is not None:
+                wait.error = msg.error.message
+            else:
+                wait.accepted = True
+            _settle_start(state, wait)
+            wait.done.set()
+            return []
         turn = msg.result.get("turn") if isinstance(msg.result, dict) else None
         turn_id = turn.get("id") if isinstance(turn, dict) else None
         if (
@@ -2001,13 +2163,16 @@ class CodexAppServerRunner(CodexRunner):
         if not (state.live_mode and state.completed_turns):
             return []
         state.ctx_emitted = None  # re-show % ctx for this turn
+        state.idle_since = None
         wait = state.pending_start
         reason, command_uuid = "unknown", None
+        state.turn_compact = False
         # A turn that starts while the follow-up is still unwritten is
         # Codex's own (review H2); the answer reconciles the rest.
         if wait is not None and wait.sent and wait.turn_id in (None, turn.id):
             wait.turn_id, wait.started = turn.id, True
             reason, command_uuid = "followup", wait.command_uuid
+            state.turn_compact = wait.compact
             _settle_start(state, wait)
         state.turn_reason, state.turn_command_uuid = reason, command_uuid
         logger.info(
@@ -2244,7 +2409,14 @@ class CodexAppServerRunner(CodexRunner):
         """A live run's later turn: its TurnEvent (never a CompletedEvent)."""
         answer = self._answer(state)
         if turn.status == "completed":
-            return [self._turn_completed_event(state, ok=True, answer=answer)]
+            usage = None
+            if state.turn_compact:
+                # #964-3b: an injected /compact; the bridge answers
+                # "🗜️ Context compacted" for it, as for a /compact run.
+                usage = {"compaction": {"trigger": "manual", "manual_success": True}}
+            return [
+                self._turn_completed_event(state, ok=True, answer=answer, usage=usage)
+            ]
         rows = self._close_open_items(
             state, "cancelled" if turn.status == "interrupted" else "failed"
         )
@@ -2322,6 +2494,7 @@ class _CodexSteer:
         if (
             state is None
             or state.closing
+            or state.steer_closed
             or state.stopped is not None
             or not state.turn_open
             or state.turn_id is None
@@ -2340,10 +2513,17 @@ class _CodexSteer:
             return "window_closed"
         command_uuid = str(kwargs.get("command_uuid") or "")
         wait = _SteerWait(command_uuid=command_uuid)
+        rids: list[int] = []
 
         def register(rid: int) -> None:
+            rids.append(rid)
             state.steer_waits[rid] = wait
             state.steer_texts[command_uuid] = text
+
+        def window_open() -> bool:
+            # Re-checked under the writer lock: a /cancel that closed the
+            # window while this waited for the writer stops it (#775).
+            return not (state.closing or state.steer_closed)
 
         params = {
             "threadId": session_id,
@@ -2352,9 +2532,13 @@ class _CodexSteer:
             "clientUserMessageId": command_uuid,
         }
         try:
-            await state.peer.submit("turn/steer", params, before_send=register)
+            await state.peer.submit(
+                "turn/steer", params, before_send=register, guard=window_open
+            )
         except CodexRpcClosed:
             state.steer_texts.pop(command_uuid, None)
+            for rid in rids:
+                state.steer_waits.pop(rid, None)
             logger.info("codex.app_server.steer_unsent", command_uuid=command_uuid)
             return "window_closed"
         except CodexRpcWriteTimeout:
@@ -2392,7 +2576,7 @@ STEER_BACKEND = _CodexSteer()
 
 
 async def start_followup(
-    state: AppServerRunState, text: str, *, command_uuid: str
+    state: AppServerRunState, text: str, *, command_uuid: str, compact: bool = False
 ) -> str:
     """#964-3a: a follow-up ``turn/start`` on a live run's idle thread
     (964-3b's ``inject_when_idle`` calls it under the session lock).
@@ -2403,7 +2587,11 @@ async def start_followup(
     ``absorbed`` (Codex put it into a turn already running), ``busy`` (a turn
     is open or another start is in flight; nothing written), ``closed`` /
     ``unsent`` (not written), ``refused`` (Codex said no), ``unconfirmed``
-    (sent, never answered: treat as written, never send it twice)."""
+    (sent, never answered: treat as written, never send it twice).
+
+    ``compact`` (#964-3b, an injected bare ``/compact``): Codex's native
+    ``thread/compact/start`` in place of ``turn/start``; its turn is the
+    follow-up's like any other."""
     peer = state.peer
     if (
         not state.live_mode
@@ -2413,9 +2601,9 @@ async def start_followup(
         or peer.closed_reason is not None
     ):
         return "closed"
-    if state.turn_open or state.pending_start is not None:
+    if state.turn_open or _expire_stale_start(state):
         return "busy"
-    wait = _StartWait(command_uuid=command_uuid, text=text)
+    wait = _StartWait(command_uuid=command_uuid, text=text, compact=compact)
 
     def register(rid: int) -> None:
         # Before the write, with no await since the checks above.
@@ -2427,15 +2615,18 @@ async def start_followup(
         # Only from here can a turn/started be this follow-up's (review H2).
         wait.sent = True
 
-    params = {
-        "threadId": state.thread_id,
-        "input": [{"type": "text", "text": text}],
-        "clientUserMessageId": command_uuid,
-    }
+    method, params = (
+        "turn/start",
+        {
+            "threadId": state.thread_id,
+            "input": [{"type": "text", "text": text}],
+            "clientUserMessageId": command_uuid,
+        },
+    )
+    if compact:
+        method, params = "thread/compact/start", {"threadId": state.thread_id}
     try:
-        await peer.submit(
-            "turn/start", params, before_send=register, after_send=written
-        )
+        await peer.submit(method, params, before_send=register, after_send=written)
     except CodexRpcClosed:
         if state.pending_start is wait:
             state.pending_start = None
@@ -2472,3 +2663,427 @@ async def start_followup(
         sent=wait.sent,
     )
     return "unconfirmed"
+
+
+# --- live sessions (#964-3b; ``live_sessions._CodexLive``) --------------------
+#
+# The registry entry is the run's own ``AppServerRunState`` in
+# ``_RUNS_BY_THREAD`` (kept until its process has exited). Only a run with
+# ``live_mode`` takes follow-ups; a per-run one is visible only to steer.
+
+# A follow-up whose turn never starts (its answer lost, or accepted and no
+# turn/started) stops counting as pending after this, so the session can't
+# look busy forever (Claude's ``_INJECTED_TURN_TIMEOUT_S``).
+FOLLOWUP_TURN_TIMEOUT_S = 120.0
+HANDOFF_POLL_S = 0.25
+_INJECT_OK = frozenset({"started", "absorbed", "unconfirmed"})
+_UNSET: Any = object()
+
+
+def _live_settings() -> tuple[bool, float, float]:
+    """``[watchdog] live_sessions``, ``post_result_limbo_grace`` and
+    ``live_session_max_s``, read per spawn like Claude's (D1, D11)."""
+    enabled, grace, cap = True, 60.0, 14400.0
+    try:
+        from ..settings import load_settings_if_exists
+
+        loaded = load_settings_if_exists()
+        if loaded is not None:
+            watchdog = loaded[0].watchdog
+            enabled = bool(watchdog.live_sessions)
+            grace = float(watchdog.post_result_limbo_grace)
+            cap = float(watchdog.live_session_max_s)
+    except Exception:  # noqa: BLE001 — settings errors must not block a run
+        logger.debug("codex.live_session.settings_load_failed", exc_info=True)
+    return enabled, grace, cap
+
+
+def _expire_stale_start(state: AppServerRunState, now: float | None = None) -> bool:
+    """Whether a follow-up is still pending; one whose turn hasn't started
+    ``FOLLOWUP_TURN_TIMEOUT_S`` after it was registered is dropped (logged).
+    A turn that starts later anyway is Codex's own (``unknown``)."""
+    wait = state.pending_start
+    if wait is None:
+        return False
+    waited = (time.monotonic() if now is None else now) - wait.at
+    if wait.started or waited < FOLLOWUP_TURN_TIMEOUT_S:
+        return True
+    state.pending_start = None
+    # Its rid stays in ``followup_rids`` (the tombstone): a late answer is
+    # then ignored, never read as the first turn's (review of 3b, item 3).
+    wait.timed_out = True
+    wait.done.set()
+    logger.warning(
+        "codex.live_session.followup_turn_timeout",
+        session_id=state.thread_id,
+        command_uuid=wait.command_uuid,
+        accepted=wait.accepted,
+        waited_s=round(waited, 1),
+    )
+    return False
+
+
+def _is_idle(state: AppServerRunState) -> bool:
+    """Between turns: the first turn done, none open, no follow-up pending."""
+    return (
+        state.completed_turns > 0
+        and not state.turn_open
+        and state.pending_start is None
+    )
+
+
+def _live(session_id: str) -> AppServerRunState | None:
+    state = _RUNS_BY_THREAD.get(session_id)
+    return state if state is not None and state.live_mode else None
+
+
+def _accepting(state: AppServerRunState | None) -> bool:
+    return (
+        state is not None
+        and state.live_mode
+        and not state.closing
+        and state.stopped is None
+        and state.peer is not None
+        and state.peer.closed_reason is None
+    )
+
+
+async def _notify(state: AppServerRunState, kind: str, payload: dict[str, Any]) -> None:
+    for callback in list(state.listeners):
+        try:
+            result = callback(kind, payload)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception:  # noqa: BLE001 — a listener must never break teardown
+            logger.warning(
+                "codex.live_session.listener_failed",
+                session_id=state.thread_id,
+                kind=kind,
+                exc_info=True,
+            )
+
+
+async def close_live_session(
+    session_id: str,
+    reason: str,
+    *,
+    notice: bool = False,
+    only_if_idle: bool = False,
+) -> bool:
+    """Close a live session's stdin; Codex exits in ~0.1 s and the run ends
+    (teardown escalates if it doesn't). Idempotent; False when there is
+    nothing (left) to close, or ``only_if_idle`` and a turn or follow-up is
+    in flight (re-checked under the lock a follow-up is written under).
+    Never quarantined: Codex rollouts are durable, interrupted turns too."""
+    state = _live(session_id)
+    if state is None:
+        return False
+    async with state.lock:
+        if state.closing:
+            return False
+        if only_if_idle and not _is_idle(state):
+            return False
+        mid_turn = not _is_idle(state)
+        state.closing = True
+        state.closed_at = time.monotonic()
+        state.live_close_reason = reason
+    logger.info(
+        "codex.live_session.stdin_closed",
+        session_id=session_id,
+        reason=reason,
+        turn=state.completed_turns,
+        turn_idle=not mid_turn,
+        age_s=round(time.monotonic() - state.spawned_at, 1),
+    )
+    if notice:
+        payload: dict[str, Any] = {"reason": reason, "tasks": []}
+        if reason == "abs_cap":
+            payload["mid_turn"] = mid_turn
+            payload["max_s"] = state.live_max_s
+        await _notify(state, "closing", payload)
+    with contextlib.suppress(Exception):
+        await state.proc.stdin.aclose()
+    return True
+
+
+async def _live_ended(state: AppServerRunState, *, died: bool) -> None:
+    """After a live run's process is gone: one ``closed`` notice for an
+    Untether close, or the #1001 ``died`` notice for an exit nobody asked
+    for while idle (a crash, ``kill``; Codex never exits on its own while
+    its stdin is open, so rc 0 counts too)."""
+    reason = state.live_close_reason
+    if reason is not None:
+        logger.info(
+            "codex.live_session.closed",
+            session_id=state.thread_id,
+            close_reason=reason,
+            quarantined=False,
+        )
+        await _notify(
+            state, "closed", {"reason": reason, "quarantined": False, "tasks": []}
+        )
+        return
+    from ..shutdown import is_shutting_down
+
+    if not died or is_shutting_down():
+        return
+    from .claude import _exit_cause, _exit_signal, _signal_name
+
+    rc = getattr(state.proc, "returncode", None)
+    sig = _exit_signal(rc)
+    state.live_exit_cause = _exit_cause(rc)
+    logger.warning(
+        "codex.live_session.died_unexpectedly",
+        session_id=state.thread_id,
+        pid=getattr(state.proc, "pid", None),
+        rc=rc,
+        signal_name=_signal_name(sig),
+        exit_cause=state.live_exit_cause,
+        age_s=round(time.monotonic() - state.spawned_at, 1),
+    )
+    await _notify(
+        state,
+        "died",
+        {
+            "rc": rc,
+            "signal": sig,
+            "signal_name": _signal_name(sig),
+            "exit_cause": state.live_exit_cause,
+            "tasks": [],
+            "task_ids": [],
+            "quarantined": False,
+        },
+    )
+
+
+async def _trust_drift(state: AppServerRunState) -> str | None:
+    """§16 item 6: before a follow-up, re-read Codex's config for the
+    session's cwd and compare what the spawn's sandbox decision rested on.
+    None: unchanged (or a tier that never decided: read-only). ``drift`` or
+    ``unverifiable`` (no answer, an error): the caller stops accepting, so
+    the message resumes through a fresh, validated spawn (fail closed)."""
+    if not state.check_trust:
+        return None
+    reason: str | None = "unverifiable"
+    wait = _ReadWait()
+
+    def register(rid: int) -> None:
+        state.read_waits[rid] = wait
+
+    try:
+        await state.peer.submit(  # type: ignore[union-attr]
+            "config/read", {"cwd": state.cwd}, before_send=register
+        )
+    except (CodexRpcClosed, CodexRpcWriteTimeout):
+        wait.done.set()
+    with anyio.move_on_after(FOLLOWUP_RESPONSE_S):
+        await wait.done.wait()
+    if wait.done.is_set() and wait.error is None and state.spawn_trust is not None:
+        changed = _trust_view(state.cwd, wait.result) != state.spawn_trust
+        reason = "drift" if changed else None
+    if reason is not None:
+        logger.warning(
+            "codex.live_session.trust_changed",
+            session_id=state.thread_id,
+            reason=reason,
+            error=wait.error,
+        )
+    return reason
+
+
+async def inject_when_idle(
+    session_id: str,
+    text: str,
+    *,
+    command_uuid: str,
+    poll_s: float = 0.2,
+    cancel: Any = None,
+) -> bool:
+    """Queue semantics (D7): wait until the live session is idle, then write
+    ``text`` as a follow-up ``turn/start``, or Codex's own
+    ``thread/compact/start`` for a bare ``/compact``, under the session
+    lock. False: the caller keeps the message for the resume path. A
+    refusal closes the idle session first, so that resume isn't left behind
+    the idle grace (and nothing is retried into it)."""
+    close_reason = "error"
+    while True:
+        if cancel is not None and cancel.cancelled:
+            return False
+        state = _live(session_id)
+        if state is None or not _accepting(state):
+            return False
+        if not _expire_stale_start(state) and _is_idle(state):
+            async with state.lock:
+                if not _accepting(state):
+                    return False
+                if _is_idle(state):
+                    if await _trust_drift(state) is not None:
+                        close_reason = "trust_changed"
+                        break
+                    if cancel is not None and not cancel.claim():
+                        return False  # #935: cancelled from its queued card
+                    outcome = await start_followup(
+                        state,
+                        text,
+                        command_uuid=command_uuid,
+                        compact=_is_compact(text),
+                    )
+                    if outcome in _INJECT_OK:
+                        state.idle_since = None
+                        return True
+                    if outcome != "busy":
+                        break
+        await anyio.sleep(poll_s)
+    await close_live_session(session_id, close_reason, only_if_idle=True)
+    return False
+
+
+async def steer_into_session(
+    session_id: str,
+    text: str,
+    *,
+    command_uuid: str = "",
+    run_options: Any = _UNSET,
+    cwd: Any = _UNSET,
+    **_: Any,
+) -> str:
+    """Steer mode into a live session: mid-turn → ``turn/steer`` (964-2's
+    target, ``steered`` / ``window_closed``); idle → the same follow-up
+    write as the queue (``written_idle``), unless the chat's options or
+    directory changed since spawn (``options_changed``: the queue path
+    closes and resumes, D8). A per-run (not live) run is steer-only."""
+    state = _RUNS_BY_THREAD.get(session_id)
+    live = state is not None and state.live_mode
+    trust_changed = False
+    if state is not None and live:
+        async with state.lock:
+            if state.closing or state.steer_closed:
+                return "window_closed"
+            if _is_idle(state):
+                if run_options is not _UNSET and run_options != state.spawn_options:
+                    return "options_changed"
+                if cwd is not _UNSET and cwd != state.spawn_cwd:
+                    logger.info(
+                        "codex.live_session.context_changed",
+                        session_id=session_id,
+                        source="steer",
+                        spawn_cwd=None
+                        if state.spawn_cwd is None
+                        else str(state.spawn_cwd),
+                        cwd=None if cwd is None else str(cwd),
+                    )
+                    return "options_changed"
+                trust_changed = await _trust_drift(state) is not None
+                if not trust_changed:
+                    outcome = await start_followup(
+                        state, text, command_uuid=command_uuid
+                    )
+                    if outcome not in _INJECT_OK:
+                        return "window_closed"
+                    state.idle_since = None
+                    logger.info(
+                        "codex.live_session.steered",
+                        session_id=session_id,
+                        command_uuid=command_uuid,
+                        mid_turn=False,
+                    )
+                    return "written_idle"
+        if trust_changed:
+            # Closed outside the lock it takes; the queue path resumes.
+            await close_live_session(session_id, "trust_changed", only_if_idle=True)
+            return "options_changed"
+    outcome = await STEER_BACKEND.steer(session_id, text, command_uuid=command_uuid)
+    if outcome == "steered" and live:
+        logger.info(
+            "codex.live_session.steered",
+            session_id=session_id,
+            command_uuid=command_uuid,
+            mid_turn=True,
+        )
+    return outcome
+
+
+async def close_steer_window(session_id: str, reason: str) -> bool:
+    """No steer lands in a run being cancelled (#775): set under the lock
+    a live steer checks; the steer target's ``get`` refuses it too."""
+    state = _RUNS_BY_THREAD.get(session_id)
+    if state is None:
+        return False
+    async with state.lock:
+        state.steer_closed = True
+    if state.peer is not None:
+        # A steer already queued behind the writer sees the flag (its
+        # guard) or has been written before this returns.
+        await state.peer.write_barrier()
+    logger.info(
+        "codex.live_session.steer_window_closed", session_id=session_id, reason=reason
+    )
+    return True
+
+
+async def interrupt_pending_turn(
+    session_id: str, *, any_turn: bool = False, bound_s: float = _INTERRUPT_BOUND_S
+) -> bool:
+    """#845 for Codex: end a live session's open turn that is waiting on the
+    user (``waiting`` flags), or any open turn with ``any_turn`` (#1125),
+    with ``turn/interrupt``; True once its turn/completed arrived (the
+    reader routes both). A per-run run keeps 962-4's path: the cancelled
+    reader interrupts."""
+    state = _live(session_id)
+    if (
+        state is None
+        or not _accepting(state)
+        or not state.turn_open
+        or state.turn_id is None
+        or not (any_turn or state.waiting)
+    ):
+        return False
+    target = state.turn_id
+    try:
+        await state.peer.submit(  # type: ignore[union-attr]
+            "turn/interrupt", {"threadId": session_id, "turnId": target}
+        )
+    except (CodexRpcClosed, CodexRpcWriteTimeout):
+        return False
+    # Polled: the reader (another task) closes the turn on its turn/completed.
+    with anyio.move_on_after(bound_s):
+        while True:
+            if not (state.turn_open and state.turn_id == target):
+                logger.info("codex.live_session.interrupted", session_id=session_id)
+                return True
+            await anyio.sleep(0.02)
+    logger.warning("codex.live_session.interrupt_no_result", session_id=session_id)
+    return False
+
+
+async def close_idle_for_continue(cwd: Path | None) -> int:
+    """#1275: close the idle live sessions spawned in ``cwd``."""
+    closed = 0
+    for sid, state in list(_RUNS_BY_THREAD.items()):
+        if state.live_mode and state.spawn_cwd == cwd and not state.waiting:
+            closed += await close_live_session(sid, "continue", only_if_idle=True)
+    return closed
+
+
+async def wait_for_handoff(
+    session_id: str, timeout_s: float, *, poll_s: float = HANDOFF_POLL_S
+) -> str:
+    """#633 for Codex: ``free`` (no process owns the thread), ``exited``
+    (one did and is gone) or ``timed_out``. Ownership ends only once the
+    process has exited (§16 item 4)."""
+    if session_id not in _RUNS_BY_THREAD:
+        return "free"
+    started = time.monotonic()
+    with anyio.move_on_after(max(0.0, timeout_s)):
+        while True:
+            if session_id not in _RUNS_BY_THREAD:
+                break
+            await anyio.sleep(poll_s)
+    outcome = "timed_out" if session_id in _RUNS_BY_THREAD else "exited"
+    logger.info(
+        "session.handoff_wait_done",
+        session_id=session_id,
+        outcome=outcome,
+        elapsed_s=round(time.monotonic() - started, 1),
+    )
+    return outcome

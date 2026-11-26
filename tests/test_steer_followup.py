@@ -1361,9 +1361,9 @@ def test_agy_is_a_steer_target_not_a_live_session() -> None:
     target = live_sessions.steer_backend("antigravity")
     assert target is not None and target.engine == "antigravity"
     assert live_sessions.steer_backend("claude") is live_sessions.live_backend("claude")
-    # #964: Codex is a steer-only target too (turn/steer, app-server only).
+    # #964: Codex's live-session backend (app-server) is its steer target.
+    assert live_sessions.steer_backend("codex") is live_sessions.live_backend("codex")
     assert live_sessions.steer_backend("codex").engine == "codex"
-    assert live_sessions.live_backend("codex") is None
     assert live_sessions.steer_backend("opencode") is None
 
 
