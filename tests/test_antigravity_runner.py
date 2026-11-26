@@ -912,17 +912,17 @@ async def test_version_guard_fails_open_on_garbage(
 async def test_version_guard_quiet_on_probed_cli(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1091, #1156, #1160, #1209, #1254, #1272: the drift suite was re-run
-    on agy 1.5.12, so neither a 1.5.12 run nor an older one logs
+    """#1091, #1156, #1160, #1209, #1254, #1272, #977: the drift suite was
+    re-run on agy 1.5.18, so neither a 1.5.18 run nor an older one logs
     ``newer_than_probed`` on every message."""
-    for version in ("1.3.5", "1.3.6", "1.4.0", "1.4.10", "1.5.10", "1.5.12"):
+    for version in ("1.3.5", "1.4.10", "1.5.12", "1.5.17", "1.5.18"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None
         assert not any(
             e["event"] == "antigravity.version.newer_than_probed" for e in logs
         ), version
-    for version in ("1.5.13", "1.6.0"):
+    for version in ("1.5.19", "1.6.0"):
         monkeypatch.setattr(agy, "agy_cli_version", lambda cmd, v=version: v)
         with structlog.testing.capture_logs() as logs:
             assert await _runner()._unsupported_version_event(None) is None

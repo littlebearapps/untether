@@ -53,8 +53,9 @@ from untether.schemas import antigravity as agy_schema
 # stream change, only a "no logo" validate note, #1209; 1.5.10 on 2026-11-18,
 # no drift, gated tier green, #1254; 1.5.12 on 2026-11-19, gated tier green,
 # but the file tools are ``read_file`` / ``write_file`` / ``edit_file`` with
-# ``Path`` now, which no zero-token probe shows, #1272).
-PROBED_CLI_VERSION = "1.5.12"
+# ``Path`` now, which no zero-token probe shows, #1272; 1.5.18 on 2026-11-27,
+# no drift, re-run for #977).
+PROBED_CLI_VERSION = "1.5.18"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("agy") is None, reason="agy (Antigravity CLI) not installed"
