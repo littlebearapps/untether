@@ -52,6 +52,7 @@ from typing import Any
 import anyio
 import msgspec
 
+from ..antigravity import live as agy_live
 from ..backends import EngineBackend, EngineConfig
 from ..background_status import escape_markdown, live_shown
 from ..background_tasks import EngineBackgroundTask
@@ -1396,8 +1397,9 @@ def _error_text(error: Any) -> str | None:
 class AntigravityStreamState:
     """Per-run state. Exposed as ``stream.engine_state`` (08 §2), so attribute
     names must not collide with the Claude live-session probes the bridge
-    duck-types (``live_mode``, ``completed_turns``, ``turn_open``,
-    ``result_received_at``, ``live_wakeups`` …).
+    duck-types (``result_received_at``, ``live_wakeups`` …). A warm process
+    (#977) answers ``live_mode`` / ``completed_turns`` / ``turn_open`` on
+    purpose, read-only, so the bridge treats it as a live session.
 
     ``tasks`` is the one deliberate exception (#978): it is the neutral
     background-task map (``background_tasks.BackgroundTaskView``) that
@@ -1526,20 +1528,50 @@ class AntigravityStreamState:
     approval_steps: set[int] = field(default_factory=set)
     approval_held: dict[str, float | None] = field(default_factory=dict)
     # #977: a warm process (``[antigravity] live_sessions``): stdin stays
-    # open and each later stdin line is a turn of its own (probe P1). Named
-    # ``warm_*`` so the bridge's Claude live-session probes don't see it.
+    # open and each later stdin line is a turn of its own (probe P1). The
+    # bridge sees it through the ``live_mode`` / ``completed_turns`` /
+    # ``turn_open`` properties below (977-3); the registry is
+    # ``antigravity/live.py``.
     # ``warm_turns`` counts finished turns (the run's own is 1);
     # ``warm_turn_open`` is true from a written line to its ``result``;
     # ``warm_uuids`` holds the command uuid of each written follow-up, in
-    # order (agy runs queued lines one by one, P3).
+    # order (agy runs queued lines one by one, P3); the oldest
+    # ``warm_expired`` of them are tombstones of lines whose turn never
+    # started in time (``live.FOLLOWUP_TURN_TIMEOUT_S``).
+    # ``warm_checking``: a turn ended and its planted-config re-scan hasn't
+    # passed yet — no follow-up may be written (it would run on a config
+    # that may have changed).
     warm: bool = False
     warm_turns: int = 0
     warm_turn_open: bool = False
     warm_turn_uuid: str | None = None
     warm_uuids: deque[str | None] = field(default_factory=deque)
+    warm_expired: int = 0
+    warm_written_at: float = 0.0
+    warm_checking: bool = False
+    warm_exit_idle: bool = False
     warm_proc: Any = None
     warm_lock: anyio.Lock = field(default_factory=anyio.Lock)
     warm_closing: str | None = None
+
+    # -- the bridge's live-session probes (#776 names; #977) -----------------
+
+    @property
+    def live_mode(self) -> bool:
+        return self.warm
+
+    @property
+    def completed_turns(self) -> int:
+        return self.warm_turns
+
+    @property
+    def turn_open(self) -> bool:
+        """Not between turns: a turn, its re-scan or a written line waits."""
+        return (
+            self.warm_turn_open
+            or self.warm_checking
+            or len(self.warm_uuids) > self.warm_expired
+        )
 
     def note_approval_wait(self, step: int, waiting: bool) -> None:
         """#1080: a step waiting on an approval card isn't background work —
@@ -1827,6 +1859,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                             # R3: agy loaded its config at spawn; the next
                             # message respawns and runs every check again.
                             await self.close_warm(state, "config_changed")
+                    state = warm["state"] if warm is not None else None
+                    if turn_end and state is not None and state.warm:
+                        # Only now is the session between turns (#977-3).
+                        await agy_live.turn_ended(state)
                     if turn_end:
                         evt = _with_warning_block(evt, warnings)
                     elif not isinstance(evt, TurnEvent):
@@ -1839,6 +1875,11 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             if gate is not None:
                 with anyio.CancelScope(shield=True):
                     await gate.aclose()
+            state = warm["state"] if warm is not None else None
+            if state is not None and state.warm:
+                # The process has exited: the conversation is free (#977-3).
+                with anyio.CancelScope(shield=True), anyio.move_on_after(5):
+                    await agy_live.ended(state, died=state.warm_exit_idle)
 
     def _warm_eligibility(
         self, prompt: str, decision: ModeDecision, pre: _RunPrecheck | None
@@ -1856,7 +1897,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if live_sessions.live_backend(ENGINE) is None:
             # Nothing would route the next message to the warm process: it
             # would spawn a second agy on the same conversation (a silent
-            # fork). 977-3 registers the backend.
+            # fork). ``live_sessions._AgyLive`` (977-3) is that route.
             return False, "no_backend"
         options = get_run_options()
         if (
@@ -2786,6 +2827,10 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         assert proc.stdin is not None and payload is not None
         state.warm_proc = proc
         state.warm_turn_open = True
+        # #977-3: from spawn until exit, the conversation's live session.
+        agy_live.register(
+            self, state, options=get_run_options(), cwd=get_run_base_dir()
+        )
         async with state.warm_lock:
             await proc.stdin.send(payload)
         logger.info(
@@ -2822,6 +2867,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
                 return "closed"
             # Before the write: agy's ``user_input`` step may come back first.
             state.warm_uuids.append(command_uuid)
+            state.warm_written_at = time.monotonic()
             try:
                 await proc.stdin.send(payload)
             except (anyio.BrokenResourceError, anyio.ClosedResourceError, OSError):
@@ -2953,17 +2999,25 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
     ) -> AsyncIterator[UntetherEvent]:
         """#977: read past the first result until agy exits. The #505 guard
         (a grandchild holding stdout) is the base watchdog's post-exit drain,
-        armed by ``stream.followup_turns``."""
-        async for raw_line in self.iter_json_lines(stdout):
-            for evt in self._handle_jsonl_line(
-                raw_line=raw_line,
-                stream=stream,
-                state=state,
-                resume=resume,
-                logger=logger,
-                pid=pid,
-            ):
-                yield evt
+        armed by ``stream.followup_turns``. The live session's idle close
+        and time limit run beside the reader (977-3)."""
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(agy_live.lifecycle, state)
+            try:
+                async for raw_line in self.iter_json_lines(stdout):
+                    for evt in self._handle_jsonl_line(
+                        raw_line=raw_line,
+                        stream=stream,
+                        state=state,
+                        resume=resume,
+                        logger=logger,
+                        pid=pid,
+                    ):
+                        yield evt
+            finally:
+                tg.cancel_scope.cancel()
+        # Idle at EOF with no close asked for: agy died (#1001 notice).
+        state.warm_exit_idle = agy_live.is_idle(state)
         if state.warm_turn_open and state.warm_turns:
             # A later turn agy never finished (exit, a stop on stderr).
             yield state.factory.turn_completed(
@@ -3385,6 +3439,7 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
             return []
         state.warm_turn_open = True
         state.warm_turn_uuid = state.warm_uuids.popleft() if state.warm_uuids else None
+        state.warm_expired = max(0, state.warm_expired - 1)
         # Per-turn state (§5.2): answer text, the run's own token sum, rows
         # and verdicts (settled at the result), background bookkeeping.
         state.text_by_step.clear()
@@ -3422,6 +3477,8 @@ class AntigravityRunner(ResumeTokenMixin, JsonlSubprocessRunner):
         if not state.warm or not any(isinstance(e, CompletedEvent) for e in out):
             return out
         state.warm_turn_open = False
+        # Not idle until ``run_impl``'s re-scan has passed (977-3).
+        state.warm_checking = True
         state.warm_turns += 1
         if state.warm_turns == 1:
             # Run-level, once: the plan header and the retired plan cards.

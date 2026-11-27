@@ -1353,12 +1353,14 @@ async def test_agy_steer_after_result_falls_back(agy_gate_installed: None) -> No
     assert not gate.steer_queue
 
 
-def test_agy_is_a_steer_target_not_a_live_session() -> None:
+def test_agy_steer_target_is_its_live_backend() -> None:
+    """#977: Antigravity's live backend (warm processes, switch off by
+    default) is its steer target; it delegates steer to the gate."""
     from untether import live_sessions
 
-    assert live_sessions.live_backend("antigravity") is None
     assert not live_sessions.supports_live_session("antigravity")
     target = live_sessions.steer_backend("antigravity")
+    assert target is live_sessions.live_backend("antigravity")
     assert target is not None and target.engine == "antigravity"
     assert live_sessions.steer_backend("claude") is live_sessions.live_backend("claude")
     # #964: Codex's live-session backend (app-server) is its steer target.

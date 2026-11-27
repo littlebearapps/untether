@@ -10,7 +10,7 @@ live process, closing, an engine with no live-session backend) falls back to
 the unchanged resume path.
 
 The engine's registry is reached through :mod:`untether.live_sessions`
-(#977); Claude and Codex app-server (#964) are the backends.
+(#977); Claude, Codex app-server (#964) and Antigravity are the backends.
 """
 
 from __future__ import annotations
