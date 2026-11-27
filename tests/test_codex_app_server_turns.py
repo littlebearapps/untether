@@ -579,11 +579,13 @@ def test_turn_local_state_resets_on_a_new_turn() -> None:
     state.completed_turns = 1
     state.card_stop = True
     state.ctx_emitted = (5, 1000)
+    state.compactions = 1  # an earlier turn's /compact: never this turn's
     state.file_changes["x"] = []
     turn = {"id": "turn-2", "status": "inProgress", "items": []}
     _translate(runner, state, "turn/started", {"threadId": THREAD, "turn": turn})
     assert state.card_stop is False
     assert state.ctx_emitted is None
+    assert state.compactions == 0
     _translate(
         runner,
         state,

@@ -1,11 +1,13 @@
 # Steer a running agent
 
-When Claude Code (or Antigravity CLI) is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
+When Claude Code (or Codex, or Antigravity CLI) is halfway through a task and you think of something else — "also check the logs", "use the staging database instead" — you have two choices for the message you send from [Telegram](https://telegram.org):
 
 - **queue** (the default) — the message waits until Claude's current turn finishes, then runs as the next turn.
 - **steer** — the message goes straight into the run that is already working. Claude reads it at its next step (the next time a tool finishes) and folds it into the answer it is producing.
 
-Steer works on **Claude Code** and **Antigravity**. Claude needs a live session, which means a permission mode is set (`/planmode` or `/config` → Permission mode) and `[watchdog] live_sessions` is on (the default). Antigravity needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: the message goes into the agy run that is working, before agy's next step. Other engines always queue.
+Steer works on **Claude Code**, **Codex** (app-server transport only) and **Antigravity**. Claude needs a live session, which means a permission mode is set (`/planmode` or `/config` → Permission mode) and `[watchdog] live_sessions` is on (the default). Codex needs `transport = "app-server"` under `[engines.codex]`: the message goes into the running turn through Codex's own steer request. Antigravity needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host: the message goes into the agy run that is working, before agy's next step. OpenCode, Pi and Codex on the default `exec` transport always queue.
+
+**Codex differences.** Codex reads a steer at its next step, including in the middle of a command, and folds it into the same turn. It can't take one while it is compacting the conversation (after `/compact` or on its own): the message queues and runs once compaction ends. After an answer the Codex process stays open for about a minute (a live session, `[watchdog] post_result_limbo_grace`), so a message sent then runs as the next turn in that same process, replying to its own message, with no `Steered` acknowledgement. The session closes by itself when idle, on `/cancel` or `/new`, or when the chat's model, mode or project changes; the next message resumes the same conversation. If Codex stops unexpectedly between turns you get `⚠️ The Codex session ended unexpectedly`. A background command Codex left running stops when the session closes. Cron and webhook runs never stay open.
 
 **Antigravity differences.** There is no live session: a steer only reaches a run that is still working. If agy has already started writing its final answer (no further step), the steer doesn't reach it and you get `⚠️ The session ended before this message ran — please send it again.` after the run.
 
@@ -62,12 +64,13 @@ The message is queued as normal and Untether tells you why:
 
 | Reply | Meaning |
 |---|---|
-| `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine isn't Claude Code or Antigravity. |
+| `↪️ Steer isn't supported on codex — queued instead.` | The chat's engine can't take a steer (OpenCode, Pi, or Codex on the `exec` transport). |
 | `↪️ Steer needs Untether's agy plugin on this host (untether agy-gate install) — queued instead.` | Antigravity without the plugin. |
 | `↪️ The Antigravity turn is still starting, so it can't take a message yet — queued; it runs when this turn ends.` | Antigravity: the run hasn't started agy's conversation yet (the first few seconds), so there is nothing to steer into ([#1077](https://github.com/littlebearapps/untether/issues/1077)). |
 | `↪️ No running Antigravity turn to steer — queued instead.` | Antigravity: nothing is running, the run has already sent its answer, or its hooks aren't reaching Untether. |
+| `↪️ No running Codex turn to steer — queued instead.` | Codex: nothing is running yet (the turn hasn't started) or the run has already ended. |
 | `↪️ No live Claude run to steer — queued instead.` | Nothing is running, the session has no permission mode (legacy mode can't take input mid-run), live sessions are off (`[watchdog] live_sessions = false`), or there is no session to steer into (for example handoff mode with nothing stored). |
-| `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down. |
+| `↪️ The current run is ending — queued instead.` | The run was cancelled or is shutting down, or (Codex) the turn ended or Codex refused the steer, for example while it compacts. |
 | `↪️ Earlier messages are still waiting to run — queued behind them.` | A message you sent earlier is still queued for this session, so this one waits its turn behind it instead of jumping ahead into the current run (`/steer <text>` still steers) ([#1164](https://github.com/littlebearapps/untether/issues/1164)). |
 
 In a forum group, "running" means running in the topic you sent the message in (General counts as its own topic); a run in another topic doesn't produce a notice ([#990](https://github.com/littlebearapps/untether/issues/990)). Likewise a `/<engine>` message for a different engine from the busy run (say `/codex …` while Claude Code is working) starts on its own without a notice ([#1177](https://github.com/littlebearapps/untether/issues/1177)).
