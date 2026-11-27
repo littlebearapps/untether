@@ -21,7 +21,7 @@ flags and sessions, and a Gemini CLI setup doesn't carry over.
 | `/usage` | agy's quota groups and AI credits, at no token cost |
 | `/compact` | Yes: agy's own compaction of the chat's conversation (agy 1.3.5 or newer). No other agy slash command is passed through |
 | Cost | Tokens only, no dollar figure, so `[cost_budget]` never trips |
-| Live sessions | No: each message is its own agy run |
+| Live sessions | Opt-in (`live_sessions = true`, off by default): Workspace and Full access chats keep agy running between messages. See [Live sessions](#live-sessions) |
 
 ## Before you start
 
@@ -454,6 +454,36 @@ prompt = "Update docs/notes.md from today's commits."
 
 See [Schedule tasks](schedule-tasks.md) and [Webhooks and cron](webhooks-and-cron.md).
 
+## Live sessions
+
+Off by default. Turn them on and an Antigravity chat in **Workspace** or **Full access** keeps its agy process
+running for about a minute after each answer. A message you send in that minute goes straight into the same
+process as the next turn, so it skips agy's start-up (about two seconds) and the reply carries `✓ turn complete`.
+After a minute with nothing sent, the process closes by itself, without a message in the chat. The next message
+starts agy again on the same conversation, as before.
+
+```toml
+[antigravity]
+live_sessions = true
+```
+
+The setting is picked up without a restart. Each warm chat holds one agy process of about 270 MB.
+
+- **Ask me, Plan first, scheduled runs and `/compact` always start agy afresh**, with the setting on or off.
+- **Changing the chat's model, effort, permission mode or project** closes the warm process; your message then
+  starts agy with the new setting.
+- **`/cancel` while agy is answering** stops the process, as it always has. The conversation is kept, and the next
+  message picks it up.
+- **`/steer` works the same way:** it needs [Untether's agy plugin](#telegram-questions-and-steer) and reaches the
+  turn that is running.
+- `/new`, `/continue` and `/compact` close an idle process first, so only one agy ever works on the conversation.
+
+!!! warning "Don't resume a warm conversation in a terminal"
+    Untether can't see agy sessions you start yourself. If you run `agy --conversation <id>` (or `agy -r`) on a
+    conversation while its Telegram chat still has agy running, two agy processes write to the same
+    conversation. Wait a minute after the last answer, or send `/cancel` in the chat, before you resume it in a
+    terminal.
+
 ## Project config Untether warns about
 
 agy runs its own hooks, plugins, custom agents and `.agents/mcp_config.json` MCP servers in **every** mode,
@@ -478,8 +508,9 @@ This is a tripwire with known limits, not isolation. The limits are listed in th
   can't be trusted. Other agy config Untether doesn't manage can be trusted (see above).
 - Approval buttons, question buttons and `/steer` without [Untether's agy plugin](#telegram-questions-and-steer)
   on the host.
-- Live sessions: each message is its own agy run (a steer goes into the run that is in flight), so there is no
-  status message after the answer and no `🔔 Background task finished` follow-up.
+- Live sessions in Ask me and Plan first, and by default: unless you turn them on, each message is its own agy run.
+  Even when they are on there is no status message after the answer and no `🔔 Background task finished`
+  follow-up (agy holds its answer until its background work ends).
 - Claude Code's extras: the Pause & Outline Plan button, Loop mode and a
   progress row when the conversation is compacted automatically (agy's own compactions are only counted in the
   status line; `/compact` is confirmed).
@@ -516,7 +547,7 @@ is listed in the [error reference](../reference/errors.md#antigravity-messages).
 
 ## Configuration
 
-All four keys are optional.
+All five keys are optional.
 
 === "untether config"
 
@@ -533,6 +564,7 @@ All four keys are optional.
     cmd = "~/.local/bin/agy"           # path to agy (default: agy on PATH, then ~/.local/bin/agy)
     permission_mode = "workspace"      # workspace (default) | ask | plan | full
     approval_timeout_s = 900           # Ask me: how long a card waits (60–3000 s)
+    live_sessions = false              # true: keep agy running between messages (Workspace / Full access)
     ```
 
 `permission_mode = "full"` makes Full access the default for every Antigravity chat that hasn't picked a mode.

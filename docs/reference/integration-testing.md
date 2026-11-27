@@ -100,7 +100,7 @@ These tests were previously considered "manual" but can be automated via MCP and
 | Subscription usage | Yes | - | - | - | Quota groups (`/usage`) | - | - |
 | Diff preview | Yes | Yes (app-server) | - | - | Yes (Ask me, agy plugin) | - | - |
 | Steer follow-ups | Yes | Yes (app-server) | - | - | Yes (agy plugin) | - | - |
-| Live sessions | Yes | Yes (app-server) | - | - | - (one `agy` run per message) | - | - |
+| Live sessions | Yes | Yes (app-server) | - | - | Opt-in (`[antigravity] live_sessions`; Workspace and Full access) | - | - |
 
 Antigravity has four permission modes. Two are picked before the run and were all 0.36.1rc1 had: **Workspace** (the
 default: `agy`'s own `--mode=accept-edits` under Untether's no-shell agent, so file edits inside the project and no
@@ -582,7 +582,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
 | Claude stream schema / rate-limit / API-retry handling (`schemas/claude.py`, `runners/claude.py`) | `uv run pytest tests/test_claude_cli_schema_drift.py`, RC12-2, RC12-3, S1, R20-922a…c (usage-credits cap latch) |
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7, R20-919a…d + R20-920a…e (approval reminders) |
-| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `live_sessions.py`, `telegram/steer.py`, `scheduler.py`) | B-LIVE-1…7, CX-22…CX-30 (Codex app-server), RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
+| Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `live_sessions.py`, `antigravity/live.py`, `telegram/steer.py`, `scheduler.py`) | B-LIVE-1…7, CX-22…CX-30 (Codex app-server), AG-62…AG-69 (Antigravity), RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
 | Claude hooks / `--include-hook-events` (`runners/claude.py` hook frames, SDK hook callbacks) | RC14-6, R17-828, R20-923, R20-925a/d/h (hook callbacks on every control-channel spawn) |
 | Loop scheduling (`loop_scheduler.py`, `telegram/loop.py`, `[loop]` settings, Claude CronCreate/CronDelete/ScheduleWakeup handling) | R20-925a…m, R20-926a…c, R17-01d, U6, Q16 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
@@ -2172,3 +2172,32 @@ A Claude `/compact` only works inside the 60 s live window until [#834](https://
 | R362-1182j agy automatic (optional, costs ~100k flash tokens) | Antigravity chat with `AGY_CLI_AUTO_COMPACT_OVERRIDE=20K` in the dev unit's environment, model `gemini-3.8-flash-low`: `/new`, then ask agy to read a ~18 KB file in full with `read_file` (one call) | The header gains `(1)`; no new row | `antigravity.compaction manual=False`, `session.compaction_counted engine=antigravity count=1`. Remove the override afterwards |
 
 Also re-run R15-19c (its final header now ends `· 🗜️ 1`) and R15-19e (an automatic compaction is counted the same way, best effort).
+
+### Antigravity live sessions (#977)
+
+Antigravity chat (`5540298446`, Bot API `-5540298446`), project `antigravity-test`, **Workspace** unless the row
+says otherwise, `/new` first. The dev config needs `live_sessions = true` under `[engines.antigravity]` (it
+hot-reloads; edit only that line and put it back afterwards). Logs:
+`journalctl --user -u untether-dev -o cat --since "<UTC time>" | grep -E "antigravity\.live_session|subprocess\.(spawn|exit)|runner\.completed|antigravity\.steer"`.
+Process check: `pgrep -af '^/home/nathan/.local/bin/agy'` (a plain `pgrep -fa "agy --input-format"` also matches
+the shell running it). The numbers start at AG-62 because AG-61 is the #1032 trust row.
+
+| ID | Steps | Expected in Telegram | Expected log signature |
+|---|---|---|---|
+| AG-62 warm follow-up | `Reply with exactly: ONE`; once it answers, wait about 10 s, then `Reply with exactly: TWO` | Two finals with the same resume line; the second arrives in about 3 s and its footer carries `✓ turn complete` | One `subprocess.spawn` (args start `--input-format stream-json`, no `--conversation` after `/new`) preceded by `antigravity.live_session.eligible warm=True reason=ok`; for TWO: `antigravity.live_session.written queued=False`, `antigravity.live_session.injected source=scheduler`, `antigravity.live_session.turn_started`, `live_turn.started reason=followup`, `runner.completed` |
+| AG-63 idle close | After AG-62, send nothing for 70 s | Nothing (the idle close is silent) | 60 s after TWO's answer: `antigravity.live_session.closing reason=idle_no_tasks`, `subprocess.exit rc=0`, `antigravity.gate.closed steers_undelivered=0`, `antigravity.live_session.closed reason=idle_no_tasks turns=2`, `session.summary followup_turns=1`; `pgrep` shows no agy. Note whether a daemon started in the turn survived (R8; not exercised in Workspace, which has no shell) |
+| AG-64 options change | Warm session (one prompt), then `/model set gemini-3.8-flash`, then `Reply with exactly: FOUR` | FOUR answered; the footer shows the new model | On the prompt: `antigravity.live_session.closing reason=options_changed`, `antigravity.live_session.options_changed closed=True`, `subprocess.exit rc=0`, `antigravity.live_session.closed reason=options_changed`, then a new `subprocess.spawn` with `--conversation=<same id>` and `--model=gemini-3.8-flash` |
+| AG-65 cancel mid-turn | Warm session, then `Write a 1500-word essay about the history of rivers. Do not use any tools.`; `/cancel` as soon as `antigravity.live_session.turn_started` is logged; then `Reply with exactly: FIVE` | The essay's message reads `cancelled · antigravity`; FIVE is answered with the same resume line | `cancel.requested`, `antigravity.live_session.steer_window_closed reason=cancel`, `subprocess.exit rc=1 reason=teardown`, `session.summary cancelled=True`, `live_turn.cancelled`; for FIVE a new `subprocess.spawn` with `--conversation=<same id>` (a cold resume) |
+| AG-66 steer into a warm turn | Warm session, then `Read README.md, then list the files in this folder, then read README.md again, then reply with its first line.`; while it works `/steer Also end your reply with the word PINEAPPLE.` | `↪️ Steered into the current run.`; one final, ending PINEAPPLE, with `✓ turn complete` | `antigravity.live_session.injected` for the prompt, then `antigravity.steer.queued`, `steer.written explicit=True mid_turn=True`, `antigravity.steer.injected count=1`, `antigravity.steer.delivered`; one `runner.completed`, no extra turn |
+| AG-67 one-shot modes | Switch on. (a) `/compact` with a warm session idle. (b) `/config` → Permission mode → Plan first, a planning prompt, then Deny. (c) Ask me, `/new`, `Reply with exactly: ASK` (trust the project's agy config first if it has any Untether doesn't manage, and revoke it afterwards). (d) a short-lived `run_once = true`, `* * * * *` cron with `project = "antigravity-test"` and `chat_id = -5540298446`; remove it afterwards | (a) `🗜️ Context compacted (manual)`. (b) the plan card. (c) ASK. (d) the `⏰ Scheduled` run's answer | (a) `antigravity.live_session.closing reason=compact`, `.closed reason=compact`, then `eligible warm=False reason=compact`, a spawn without `--disable-slash-commands`, `antigravity.compact.done`. (b) `warm=False reason=mode_plan`. (c) `warm=False reason=mode_ask`. (d) `warm=False reason=unattended`. Each is one spawn whose `subprocess.exit rc=0` follows its answer within seconds |
+| AG-68 `/continue` with a warm session | Warm session idle, then `/continue` | A normal `/continue` answer on the same conversation | `antigravity.live_session.closing reason=continue`, `antigravity.live_session.continue_closed closed=1`, `subprocess.exit rc=0`, `antigravity.live_session.closed reason=continue`, then `antigravity.continue.resolved` and one new spawn; never two agy processes (sample `pgrep` every second) |
+| AG-69 switch off | Set `live_sessions = false`, then repeat AG-62 (`OFF1`, `OFF2`); then AG-1. Set it back to `true` | Two finals with no `✓ turn complete`; AG-1 as its row | Two `subprocess.spawn` lines, each followed by `subprocess.exit rc=0` right after its answer; **no** `antigravity.live_session.*` line at all |
+
+Run 2026-11-27 on `5985d502` (agy 1.5.18), all **PASS**: AG-62 TWO answered in 3.2 s from the same process;
+AG-63 closed at exactly 60 s with rc 0; AG-64, AG-65 (rc 1 from the SIGTERM, then a cold resume), AG-66 (one final
+ending PINEAPPLE), AG-67 (a) to (d), AG-68 (at most one agy at any sample) and AG-69 as expected. Regression in the
+same run: B-LIVE-1 and B-LIVE-3 on Claude (one spawn for the whole exchange, follow-up answered in 2 s, wake after)
+and AG-1 with the switch off, all PASS. A `/cancel` mid-turn logs no `antigravity.live_session.closed` line (the
+run ended, not an Untether close); that is expected.
+
+**Required for #977:** AG-62…AG-69, B-LIVE-1, B-LIVE-3 and AG-1 with the switch off.
