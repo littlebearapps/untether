@@ -6,8 +6,13 @@ waits (probe P1, agy 1.5.17), so a warm run's first result is the run's only
 ``CompletedEvent`` and every later turn is a ``TurnEvent(started) →
 ActionEvent* → TurnEvent(completed)`` segment. stdin EOF ends the process
 with rc 0 (P6). End to end through ``run()`` with the fake ``agy``
-(``UNTETHER_FAKE_AGY_WARM=1``: one script segment per stdin line); the
-backend, idle close and bridge wiring are 977-3's.
+(``UNTETHER_FAKE_AGY_WARM=1``: one script segment per stdin line).
+
+977-3: the live-session backend (``antigravity/live.py`` behind
+``live_sessions._AgyLive``) — follow-ups only between turns and only after
+the turn's config re-scan, idle close, the time limit at a turn boundary,
+``/compact`` and ``/continue`` closing an idle process, per-turn "send it
+again" for steers that never ran, and the bridge's live probes.
 """
 
 from __future__ import annotations
@@ -48,11 +53,10 @@ CID = "4e1f0c2a-7b3d-4c59-9a86-2d5f3e7b9c10"
 
 @pytest.fixture
 def warm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Warm fake agy, a registered agy live backend (977-3 registers the real
-    one) and a record of what agy received."""
+    """Warm fake agy and a record of what agy received (the real agy live
+    backend is registered, 977-3)."""
     monkeypatch.setenv("UNTETHER_FAKE_AGY_WARM", "1")
     monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "warm_two_turns")
-    monkeypatch.setitem(live_sessions._BACKENDS, "antigravity", object())
     record = tmp_path / "record.json"
     monkeypatch.setenv("UNTETHER_FAKE_AGY_RECORD", str(record))
     return record
@@ -451,12 +455,25 @@ def test_step_index_keeps_counting() -> None:
     assert state.text_by_step == {3: "TWO\n"}
 
 
-def test_warm_state_names_dont_collide_with_bridge_probes() -> None:
-    """The bridge duck-types Claude's live-session probes on
-    ``stream.engine_state``; until 977-3 wires agy in, none may appear."""
+def test_bridge_probes_read_the_warm_state() -> None:
+    """977-3: the bridge duck-types ``live_mode`` / ``completed_turns`` /
+    ``turn_open`` on ``stream.engine_state`` (/cancel's idle close, /new,
+    drain, the progress monitor, early final delivery). A warm state answers
+    them read-only; Claude-only probes stay absent; a one-shot state reads
+    as not live, as before."""
     _, state = _replay_warm()
-    for name in ("live_mode", "completed_turns", "turn_open", "live_wakeups"):
+    assert state.live_mode is True and state.completed_turns == 2
+    assert state.turn_open is True  # its re-scan hasn't run (no run_impl here)
+    state.warm_checking = False
+    assert state.turn_open is False
+    state.warm_uuids.append("u")  # a written line agy hasn't started
+    assert state.turn_open is True
+    state.warm_expired = 1  # ... that timed out: a tombstone
+    assert state.turn_open is False
+    for name in ("live_wakeups", "result_received_at", "live_monitors"):
         assert not hasattr(state, name), name
+    cold = AntigravityRunner(antigravity_cmd="agy").new_state("x", None)
+    assert cold.live_mode is False and cold.completed_turns == 0
 
 
 # ── gate: the steer window follows the turn ─────────────────────────────────
@@ -498,3 +515,424 @@ async def test_steer_window_stays_shut_on_a_dead_or_closed_gate(tmp_path: Path) 
     await gate2.aclose()
     gate2.note_turn_start()
     assert not gate2.queue_steer("x", "u")
+
+
+# ── 977-3: the live session (``antigravity/live.py``) ───────────────────────
+
+from types import SimpleNamespace  # noqa: E402
+
+from untether.antigravity import live as agy_live  # noqa: E402
+from untether.live_followup import inject_live_followup  # noqa: E402
+from untether.scheduler import ThreadJob  # noqa: E402
+
+BACKEND = live_sessions.live_backend("antigravity")
+TOKEN = ResumeToken(engine="antigravity", value=CID)
+
+
+@pytest.fixture
+def fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifecycle clocks for tests: a 50 ms tick, a 0.3 s idle grace."""
+    monkeypatch.setattr(agy_live, "POLL_S", 0.05)
+    monkeypatch.setattr(agy_live, "INJECT_POLL_S", 0.02)
+    monkeypatch.setattr(agy_live, "_live_settings", lambda: (0.3, 14400.0))
+
+
+def switch_on(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """``[antigravity] live_sessions = true`` in the config the backend reads."""
+    config = tmp_path / "untether.toml"
+    config.write_text(
+        '[transports.telegram]\nbot_token = "tok"\nchat_id = 123\n'
+        "allow_any_user = true\n\n[antigravity]\nlive_sessions = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("UNTETHER_CONFIG_PATH", str(config))
+
+
+class Listener:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def __call__(self, kind: str, payload: dict[str, Any]) -> None:
+        self.calls.append((kind, payload))
+
+
+def _stdin_lines(record: Path) -> list[str]:
+    lines = json.loads(record.read_text())["stdin"].splitlines()
+    return [json.loads(line)["message"]["content"] for line in lines]
+
+
+def _ev(logs: list[dict], name: str) -> list[dict]:
+    return [e for e in logs if e["event"] == name]
+
+
+@pytest.mark.anyio
+async def test_idle_session_reads_through_the_backend(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    runner = _runner()
+
+    async def body(run: WarmRun) -> None:
+        assert BACKEND is not None
+        entry = BACKEND.get(CID)
+        assert entry is not None and entry.closing is False
+        assert BACKEND.is_accepting(CID) is True
+        assert BACKEND.idle_count() == 1
+        assert BACKEND.linger_info(CID) == (True, 0)
+        assert BACKEND.turn_pending(CID) is False
+        assert BACKEND.spawn_cwd(CID) == project
+        assert BACKEND.spawn_options(CID) is None  # no run options applied
+        assert BACKEND.pre_inject_close_reason(CID) is None
+        assert await BACKEND.interrupt_pending_turn(CID, any_turn=True) is False
+        # Between turns there is nothing to steer: "no running turn".
+        assert await BACKEND.steer(CID, "x", command_uuid="s") is None
+        assert await BACKEND.wait_for_handoff(CID, 0.05) == "timed_out"
+        assert await BACKEND.close(CID, "test") is True
+        assert await BACKEND.close(CID, "test") is False  # idempotent
+        assert BACKEND.is_accepting(CID) is False
+
+    await _drive(runner, body)
+    assert BACKEND.get(CID) is None  # gone once the process exited
+    assert await BACKEND.wait_for_handoff(CID, 1.0) == "free"
+
+
+@pytest.mark.anyio
+async def test_followup_waits_for_the_turns_config_recheck(
+    project: Path,  # noqa: F811
+    warm: Path,
+    fast: None,
+) -> None:
+    """977-2 finding: a line written mid-turn is queued by agy itself, and
+    EOF from a ``config_changed`` close might still let it run on the old
+    config. So a follow-up is written only between turns, and "between
+    turns" starts once the turn's re-scan has passed."""
+    runner = _runner()
+    outcome: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        run.state.warm_checking = True  # the re-scan hasn't passed yet
+
+        async def inject() -> None:
+            outcome.append(
+                await agy_live.inject_when_idle(CID, "TWO", command_uuid="f")
+            )
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(inject)
+            await anyio.sleep(0.6)  # past the idle grace: busy, so no close
+            assert outcome == [] and _stdin_lines(warm) == ["ONE"]
+            assert BACKEND.turn_pending(CID) is True
+            run.state.warm_checking = False
+        await run.until(_turn("completed", 2))
+        await BACKEND.close(CID, "test")
+
+    await _drive(runner, body)
+    assert outcome == [True]
+    assert _stdin_lines(warm) == ["ONE", "TWO"]
+
+
+@pytest.mark.anyio
+async def test_config_change_while_idle_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+    gemini_home: Path,
+) -> None:
+    """R3 / #1032: config changed between turns (after the turn's own
+    re-scan): the follow-up is never written; the process closes so the
+    message resumes through a fresh spawn and its pre-spawn checks."""
+    runner = _runner()
+    out: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        (project / ".agents").mkdir()
+        (project / ".agents" / "hooks.json").write_text("{}")
+        out.append(await agy_live.inject_when_idle(CID, "TWO", command_uuid="f"))
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False]
+    assert _stdin_lines(warm) == ["ONE"]
+    (changed,) = _ev(logs, "antigravity.live_session.config_changed")
+    assert changed["reason"] == "changed"
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "config_changed"
+
+
+@pytest.mark.anyio
+async def test_compact_closes_idle_warm_session_then_one_shot(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    """§5.4: agy's ``/compact`` can't run in a process started with
+    ``--disable-slash-commands``: the idle warm process closes and the
+    message resumes one-shot (eligibility ``compact``)."""
+    runner = _runner()
+    out: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        out.append(await agy_live.inject_when_idle(CID, "/compact", command_uuid="c"))
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "compact"
+
+
+@pytest.mark.anyio
+async def test_continue_closes_idle_warm_session_first(
+    project: Path,  # noqa: F811
+    warm: Path,
+    tmp_path: Path,
+) -> None:
+    """#1275 / R1: a ``/continue`` in the warm process's directory closes it
+    first, so the resolved resume never runs beside it (a fork)."""
+    runner = _runner()
+    closed: list[int] = []
+
+    async def body(run: WarmRun) -> None:
+        closed.append(await BACKEND.close_idle_for_continue(tmp_path / "other"))
+        closed.append(await BACKEND.close_idle_for_continue(project))
+
+    await _drive(runner, body)
+    assert closed == [0, 1]
+
+
+@pytest.mark.anyio
+async def test_options_changed_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#996: agy takes model, mode and agent only at spawn; a follow-up under
+    other options closes the idle process (the message resumes)."""
+    switch_on(monkeypatch, tmp_path)
+    runner = _runner()
+    job = ThreadJob(chat_id=1, user_msg_id=2, text="TWO", resume_token=TOKEN)
+
+    async def options_for(_job: ThreadJob) -> Any:
+        return EngineRunOptions(model="other")
+
+    out: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        out.append(await inject_live_followup(job, options_for=options_for))
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    assert len(_ev(logs, "antigravity.live_session.options_changed")) == 1
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "options_changed"
+
+
+@pytest.mark.anyio
+async def test_abs_cap_waits_for_the_turn_boundary(
+    project: Path,  # noqa: F811
+    warm: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``[watchdog] live_session_max_s``: past it mid-turn the close waits
+    for the turn to end (#887 grace), then closes with ``abs_cap``."""
+    lines = (FIXTURES / "warm_two_turns.script").read_text().splitlines()
+    at = lines.index("turn:") + 1
+    script = tmp_path / "hold.script"
+    script.write_text("\n".join([*lines[: at + 2], "wait_go:", *lines[at + 2 :]]))
+    go = tmp_path / "go"
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCRIPT", str(script))
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_GO", str(go))
+    monkeypatch.setattr(agy_live, "POLL_S", 0.05)
+    monkeypatch.setattr(agy_live, "_live_settings", lambda: (60.0, 0.5))
+    runner = _runner()
+    listener = Listener()
+
+    async def body(run: WarmRun) -> None:
+        assert BACKEND.add_listener(CID, listener)
+        await runner.send_followup(run.state, "TWO", command_uuid="f")
+        await run.until(_turn("started", 2))
+        await anyio.sleep(0.8)  # past the cap, mid-turn
+        assert not run.state.warm_closing
+        go.write_text("go")
+
+    with structlog.testing.capture_logs() as logs:
+        run = await _drive(runner, body)
+    assert len(_ev(logs, "antigravity.live_session.abs_cap_deferred")) == 1
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "abs_cap"
+    assert _turns(run.events)[-1][:2] == ("completed", 2)
+    # Closed between turns: no "closing" notice (nothing was cut short).
+    assert [k for k, _ in listener.calls] == ["closed"]
+
+
+@pytest.mark.anyio
+async def test_idle_process_that_dies_gives_the_died_notice(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    """#1001: agy never exits on its own with stdin open, so an idle exit
+    nobody asked for is announced (named Antigravity by the bridge)."""
+    import signal as _signal
+
+    runner = _runner()
+    listener = Listener()
+
+    async def body(run: WarmRun) -> None:
+        assert BACKEND.add_listener(CID, listener)
+        os.kill(run.state.agy_pid, _signal.SIGKILL)
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert [k for k, _ in listener.calls] == ["died"]
+    assert listener.calls[0][1]["signal_name"] == "SIGKILL"
+    assert len(_ev(logs, "antigravity.live_session.died_unexpectedly")) == 1
+
+
+@pytest.mark.anyio
+async def test_steers_not_run_are_reported_at_each_turn_end(tmp_path: Path) -> None:
+    """977-2 only logged them at the next turn's start; now each warm turn's
+    end hands their uuids to the listener (the bridge's "send it again"),
+    and only then does the session count as idle."""
+    gate = await _gate(tmp_path)
+    assert gate.queue_steer("late", "u1")
+    gate.note_result()
+    state = SimpleNamespace(gate=gate, warm_checking=True, session_id=CID)
+    entry = agy_live.register(None, state, options=None, cwd=None)
+    listener = Listener()
+    entry.listeners.append(listener)
+    try:
+        with structlog.testing.capture_logs() as logs:
+            await agy_live.turn_ended(state)
+    finally:
+        agy_live._ENTRIES.remove(entry)
+    assert listener.calls == [("not_run", {"command_uuids": ["u1"]})]
+    assert state.warm_checking is False
+    assert not gate.steer_queue
+    assert len(_ev(logs, "antigravity.steer.not_run")) == 1
+
+
+def test_followup_whose_turn_never_starts_expires_to_a_tombstone() -> None:
+    _, state = _replay_warm()
+    state.warm_checking = False
+    state.warm_uuids.append("late")
+    state.warm_written_at = 100.0
+    assert agy_live.is_idle(state, now=101.0) is False
+    with structlog.testing.capture_logs() as logs:
+        assert agy_live.is_idle(state, now=100.0 + 121) is True
+    assert state.warm_expired == 1 and state.turn_open is False
+    assert len(_ev(logs, "antigravity.live_session.followup_turn_timeout")) == 1
+    # A late turn still takes its own uuid (the tombstone), not the next one.
+    su = schema.StepUpdatePayload(
+        conversation_id=CID, step_index=9, state="DONE", step_type="user_input"
+    )
+    AntigravityRunner._warm_turn_start(su, state)
+    assert state.warm_turn_uuid == "late" and state.warm_expired == 0
+
+
+@pytest.mark.anyio
+async def test_close_steer_window_shuts_the_gate_for_good(tmp_path: Path) -> None:
+    gate = await _gate(tmp_path)
+    try:
+        assert await BACKEND.close_steer_window(CID, "cancel") is True
+        assert not gate.queue_steer("x", "u")
+        gate.note_result()
+        gate.note_turn_start()  # a later turn doesn't reopen it
+        assert not gate.queue_steer("y", "u2")
+    finally:
+        await gate.aclose()
+    assert await BACKEND.close_steer_window(CID, "cancel") is False
+
+
+@pytest.mark.anyio
+async def test_dead_gate_closes_instead_of_taking_a_followup(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    runner = _runner()
+    reasons: list[str | None] = []
+
+    async def body(run: WarmRun) -> None:
+        run.state.gate = SimpleNamespace(dead=True, closed=False)
+        reasons.append(BACKEND.pre_inject_close_reason(CID))
+        run.state.gate = None
+        await BACKEND.close(CID, "test")
+
+    await _drive(runner, body)
+    assert reasons == ["gate_not_ready"]
+
+
+@pytest.mark.anyio
+async def test_options_recheck_at_write_time_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    """Review H1: the chat's options are compared before the wait, but the
+    wait can span a whole turn. A switch to Ask me or Plan first meanwhile
+    must not let the follow-up run in the old (Full access) process: the
+    caller's re-check runs under the lock, just before the write."""
+    runner = _runner()
+    out: list[bool] = []
+
+    async def stale() -> bool:
+        return False
+
+    async def body(run: WarmRun) -> None:
+        out.append(
+            await agy_live.inject_when_idle(CID, "TWO", command_uuid="f", recheck=stale)
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "options_changed"
+
+
+@pytest.mark.anyio
+async def test_toml_permission_mode_change_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H2: a chat with no override follows ``[antigravity]
+    permission_mode``; its hot-reload (Full access → Ask me) leaves the chat
+    options unchanged, so the warm entry remembers the TOML mode it was
+    spawned under and closes when it differs."""
+    mode = {"value": "full"}
+    monkeypatch.setattr(agy_live, "_toml_mode", lambda: mode["value"])
+    runner = _runner()
+    out: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        mode["value"] = "ask"
+        out.append(await agy_live.inject_when_idle(CID, "TWO", command_uuid="f"))
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "options_changed"
+
+
+@pytest.mark.anyio
+async def test_direct_close_still_escalates_after_the_exit_grace() -> None:
+    """Review M1: ``close_warm`` called straight from the runner (the
+    post-turn ``config_changed`` close) sets no ``closed_at``; the lifecycle
+    stamps it, so a process that ignores stdin EOF still gets SIGTERM."""
+    proc = SimpleNamespace(returncode=None, terminated=0)
+    proc.terminate = lambda: setattr(proc, "terminated", proc.terminated + 1)
+    state = SimpleNamespace(
+        warm_closing="config_changed", warm_proc=proc, session_id=CID
+    )
+    entry = agy_live.register(None, state, options=None, cwd=None)
+    try:
+        await agy_live._tick(entry)
+        assert entry.closed_at is not None and proc.terminated == 0
+        entry.closed_at -= agy_live.EXIT_GRACE_S + 1
+        with structlog.testing.capture_logs() as logs:
+            await agy_live._tick(entry)
+    finally:
+        agy_live._ENTRIES.remove(entry)
+    assert proc.terminated == 1 and entry.escalated
+    assert len(_ev(logs, "antigravity.live_session.close_escalated")) == 1

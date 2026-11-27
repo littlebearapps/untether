@@ -513,6 +513,8 @@ class GateRun:
         self.steer_queue: deque[SteerItem] = deque()
         self.injected: deque[SteerItem] = deque()
         self.steer_open = True
+        # #977: ``close_steer_window`` (a cancel) — never reopened per turn.
+        self.steer_shut = False
         self.closed = False
         self.dead = False  # hooks don't run for this run (liveness)
         self.preinvocation_seen = False
@@ -633,11 +635,13 @@ class GateRun:
         """agy's result arrived: nothing more can be injected."""
         self.steer_open = False
 
-    def note_turn_start(self) -> None:
-        """#977: a warm agy started its next turn. Steers left from the last
-        turn never ran (logged, never carried into this one); the window
-        reopens unless the gate is closed or dead."""
-        for item in (*self.injected, *self.steer_queue):
+    def drain_unrun(self) -> list[str]:
+        """#977: a warm turn's result arrived — the steers still queued or
+        injected but never delivered won't run (logged; their command uuids,
+        for the per-turn "send it again" notice). Never carried into the
+        next turn."""
+        items = (*self.injected, *self.steer_queue)
+        for item in items:
             logger.warning(
                 "antigravity.steer.not_run",
                 run=self.key,
@@ -646,8 +650,21 @@ class GateRun:
             )
         self.injected.clear()
         self.steer_queue.clear()
+        return [item.command_uuid for item in items]
+
+    def note_turn_start(self) -> None:
+        """#977: a warm agy started its next turn. Steers left from the last
+        turn never ran (logged, never carried into this one); the window
+        reopens unless the gate is closed, dead or shut by a cancel."""
+        self.drain_unrun()
         self.stop_not_idle = None
-        self.steer_open = not (self.closed or self.dead)
+        self.steer_open = not (self.closed or self.dead or self.steer_shut)
+
+    def shut_steer(self) -> None:
+        """#775 / #977: a cancel — nothing more is injected (the hook reads
+        ``steer_open`` synchronously), and no later turn reopens it."""
+        self.steer_shut = True
+        self.steer_open = False
 
     def awaiting_answer(self, step: int) -> bool:
         """#1106: in Ask me agy runs no parent tool call before the gate's
@@ -1500,9 +1517,10 @@ RESPONDER = _GateResponder()
 class _AgySteer:
     """Steer into a running agy turn through ``PreInvocation.injectSteps``.
 
-    Not a live-session backend: agy keeps no warm process (R2-1). A steer
-    succeeds while a gated run for that conversation is in flight and agy
-    hasn't sent its result; it is injected before agy's next model call."""
+    ``live_sessions._AgyLive`` delegates steer here, warm or one-shot
+    (#977). A steer succeeds while a gated run for that conversation is in
+    flight and agy hasn't sent its turn's result; it is injected before
+    agy's next model call."""
 
     engine = ENGINE
     display_name = "Antigravity"

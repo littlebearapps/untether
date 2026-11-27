@@ -2043,7 +2043,7 @@ def _queued_wait_note(resume_token: ResumeToken) -> str | None:
     previously sat on a bare "queued" progress message for the whole hold —
     observed at 5m36s, permitted up to 30 min — with nothing telling the
     user why, or that /cancel was available. Returns ``None`` for engines
-    with no live-session backend (#977 — only Claude has one), unknown
+    with no live-session backend (#977), unknown
     sessions, and normal mid-run queues (where the active progress message
     above already explains itself).
 

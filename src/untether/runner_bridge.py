@@ -4184,7 +4184,7 @@ class ProgressEdits:
         return self.clock() - since
 
     def _is_live_session_idle(self) -> bool:
-        """#776: a live Claude session sitting between turns (the runner's
+        """#776: a live session sitting between turns (the runner's
         live-session lifecycle owns its teardown, so it is never limbo)."""
         stream = self.stream
         engine_state = getattr(stream, "engine_state", None) if stream else None
@@ -6489,7 +6489,7 @@ def unique_running_tasks(
 
 
 def running_task_is_live_idle(task: Any) -> bool:
-    """True when the run is a live Claude session sitting between turns — it
+    """True when the run is a live session sitting between turns — it
     is holding for background work or a follow-up, not doing work (#776)."""
     stream = getattr(getattr(task, "edits", None), "stream", None)
     engine_state = getattr(stream, "engine_state", None)
@@ -7721,9 +7721,9 @@ async def handle_message(
     #
     # The wait is condition-based and bounded: it returns the moment the prior
     # owner deregisters, and on timeout we quarantine and go fresh rather than
-    # racing. Only for an engine with a live-session backend (#977; Claude
-    # today) — no other engine has the limbo behaviour or a registry of
-    # session owners to wait on.
+    # racing. Only for an engine with a live-session backend (#977: Claude,
+    # Codex app-server, Antigravity) — no other engine keeps a process that
+    # holds the session, or a registry of owners to wait on.
     _live = live_backend(runner.engine)
     if resume_token is not None and _live is not None:
         _ac_cfg = _load_auto_continue_settings()
@@ -9171,6 +9171,11 @@ async def handle_message(
         )
 
     async def _on_live_notice(kind: str, payload: dict[str, Any]) -> None:
+        if kind == "not_run":
+            # Per turn, the first one included (no #887 gate: it isn't a
+            # session notice).
+            await _on_steers_not_run(payload)
+            return
         if not live_notices["all"] and payload.get("reason") != "abs_cap":
             return  # #887: before the first result only the time limit speaks
         if kind == "died":
@@ -9565,35 +9570,63 @@ async def handle_message(
         # to resolve — wait (bounded) for its verdict before draining.
         await _await_in_flight_followups(sid.value)
         for reply_to, placeholder in drain_followup_anchors(sid.value):
-            text = (
+            await _send_unrun_notice(
+                sid.value,
+                reply_to,
+                placeholder,
                 "\N{WARNING SIGN} The session ended before this message ran "
-                "— please send it again."
+                "— please send it again.",
             )
-            try:
-                # #823: name the surface on a failed edit/send's error line.
-                with message_kind("followup_notice"):
-                    if placeholder is not None:
-                        await cfg.transport.edit(
-                            ref=placeholder, message=RenderedMessage(text=text)
-                        )
-                    else:
-                        await cfg.transport.send(
-                            channel_id=reply_to.channel_id,
-                            message=RenderedMessage(text=text),
-                            options=SendOptions(
-                                reply_to=reply_to, thread_id=reply_to.thread_id
-                            ),
-                        )
-            except Exception:  # noqa: BLE001
-                logger.debug("live_followup.unrun_notice_failed", exc_info=True)
-            # #1083: an Antigravity steer that never ran logs under its own
-            # engine's name; Claude's event name is unchanged.
-            logger.warning(
-                "claude.live_session.followup_not_run"
-                if runner.engine == "claude"
-                else f"{runner.engine}.steer.not_run",
-                session_id=sid.value,
-                user_msg_id=reply_to.message_id,
+
+    async def _send_unrun_notice(
+        session_id: str,
+        reply_to: MessageRef,
+        placeholder: MessageRef | None,
+        text: str,
+    ) -> None:
+        try:
+            # #823: name the surface on a failed edit/send's error line.
+            with message_kind("followup_notice"):
+                if placeholder is not None:
+                    await cfg.transport.edit(
+                        ref=placeholder, message=RenderedMessage(text=text)
+                    )
+                else:
+                    await cfg.transport.send(
+                        channel_id=reply_to.channel_id,
+                        message=RenderedMessage(text=text),
+                        options=SendOptions(
+                            reply_to=reply_to, thread_id=reply_to.thread_id
+                        ),
+                    )
+        except Exception:  # noqa: BLE001
+            logger.debug("live_followup.unrun_notice_failed", exc_info=True)
+        # #1083: an Antigravity steer that never ran logs under its own
+        # engine's name; Claude's event name is unchanged.
+        logger.warning(
+            "claude.live_session.followup_not_run"
+            if runner.engine == "claude"
+            else f"{runner.engine}.steer.not_run",
+            session_id=session_id,
+            user_msg_id=reply_to.message_id,
+        )
+
+    async def _on_steers_not_run(payload: dict[str, Any]) -> None:
+        """#977: a warm Antigravity turn ended with steers its gate never
+        delivered. They won't run in a later turn, so say so now rather
+        than when the whole process ends."""
+        sid = progress_tracker.resume
+        for command_uuid in payload.get("command_uuids", []):
+            anchor = pop_followup_anchor(command_uuid)
+            if anchor is None or sid is None:
+                continue
+            reply_to, placeholder = anchor
+            await _send_unrun_notice(
+                sid.value,
+                reply_to,
+                placeholder,
+                "\N{WARNING SIGN} Antigravity finished its turn before this "
+                "message reached it — please send it again.",
             )
 
     turn_task_group: dict[str, Any] = {"tg": None}

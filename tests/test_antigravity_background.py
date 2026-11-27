@@ -586,9 +586,14 @@ def test_task_map_is_what_the_bridge_duck_types() -> None:
     tasks = getattr(state, "tasks", None)
     assert isinstance(tasks, dict)
     assert not any(getattr(t, "holds_session", False) for t in tasks.values())
-    # No Claude live-session attribute came along with it.
-    for name in ("live_mode", "completed_turns", "turn_open", "result_received_at"):
-        assert not hasattr(state, name), name
+    # A one-shot run reads as not live (#977: only a warm process answers
+    # the live probes); no Claude-only probe came along with it.
+    assert (state.live_mode, state.completed_turns, state.turn_open) == (
+        False,
+        0,
+        False,
+    )
+    assert not hasattr(state, "result_received_at")
 
 
 # ── #1062: a task agy killed itself ────────────────────────────────────────

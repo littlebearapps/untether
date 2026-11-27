@@ -7,7 +7,7 @@ Telegram loop ask this module for the engine's :class:`LiveSessionBackend`
 rather than testing ``engine == "claude"`` and importing the Claude runner's
 registry functions themselves.
 
-Claude and Codex app-server (#964) are the backends. Claude's adapter
+Claude, Codex app-server (#964) and Antigravity (#977) are the backends. Claude's adapter
 resolves every function on ``untether.runners.claude`` **at call time** and
 forwards the caller's
 arguments untouched, so behaviour, call shapes and monkeypatches are exactly
@@ -336,10 +336,131 @@ class _CodexLive:
         return await self._cas().wait_for_handoff(session_id, timeout_s)
 
 
-# Static on purpose: no entry points until a third engine needs one.
+class _AgyLive:
+    """Antigravity's backend (#977): warm ``agy`` processes in
+    ``untether.antigravity.live`` (resolved at call time). A one-shot run
+    has no entry and stays a steer target through its gate, as before
+    (#981); a warm one takes follow-ups between turns. agy has no
+    turn-only interrupt (P7) and holds its result for background work, so
+    there is no background count and nothing to interrupt natively."""
+
+    engine = "antigravity"
+    display_name = "Antigravity"
+    log_ns = "antigravity"
+    # live_followup passes a chat-options ``recheck`` for the write (review H1).
+    rechecks_before_write = True
+
+    @staticmethod
+    def _live() -> ModuleType:
+        return importlib.import_module("untether.antigravity.live")
+
+    @staticmethod
+    def _gate() -> Any:
+        return importlib.import_module("untether.antigravity.gate_server").STEER_BACKEND
+
+    @property
+    def supports_steer(self) -> bool:
+        return bool(self._gate().supports_steer)
+
+    def enabled(self) -> bool:
+        # ``[antigravity] live_sessions``, read per call. A process already
+        # warm when the switch goes off keeps taking follow-ups until it
+        # closes: refusing them would leave each one waiting out the #633
+        # handoff behind a process that holds the conversation.
+        live = self._live()
+        return bool(live._ENTRIES) or bool(live.switch_on())
+
+    def get(self, session_id: str) -> Any:
+        entry = self._live().entry(session_id)
+        return entry if entry is not None else self._gate().get(session_id)
+
+    def is_accepting(self, session_id: str) -> bool:
+        live = self._live()
+        return bool(live.accepting(live.entry(session_id)))
+
+    def idle_count(self) -> int:
+        return int(self._live().idle_count())
+
+    def linger_info(self, session_id: str) -> tuple[bool, int] | None:
+        entry = self._live().entry(session_id)
+        return None if entry is None else (entry.state.warm_turns > 0, 0)
+
+    def turn_pending(self, session_id: str) -> bool:
+        live = self._live()
+        entry = live.entry(session_id)
+        return entry is not None and not live.is_idle(entry.state)
+
+    def live_bg_count(self, session_id: str) -> int:
+        return 0  # agy holds its result while background work runs
+
+    async def interrupt_pending_turn(
+        self, session_id: str, *, any_turn: bool = False
+    ) -> bool:
+        return False  # P7: SIGINT ends the process; the stop path runs
+
+    def holds_background_jobs(self, session_id: str) -> bool:
+        return False
+
+    def spawn_options(self, session_id: str) -> Any:
+        entry = self._live().entry(session_id)
+        return None if entry is None else entry.spawn_options
+
+    def spawn_cwd(self, session_id: str) -> Path | None:
+        entry = self._live().entry(session_id)
+        return None if entry is None else entry.spawn_cwd
+
+    def pre_inject_close_reason(self, session_id: str) -> str | None:
+        # A gate that died (or closed) mid-session can't carry questions or
+        # steer into the next turn: resume through a fresh, gated spawn.
+        entry = self._live().entry(session_id)
+        gate = None if entry is None else entry.state.gate
+        if gate is not None and (gate.dead or gate.closed):
+            return "gate_not_ready"
+        return None
+
+    async def close_idle_for_continue(self, cwd: Path | None) -> int:
+        return await self._live().close_idle_for_continue(cwd)
+
+    async def inject_when_idle(
+        self, session_id: str, text: str, *, command_uuid: str, **kwargs: Any
+    ) -> bool:
+        return await self._live().inject_when_idle(
+            session_id, text, command_uuid=command_uuid, **kwargs
+        )
+
+    async def close(self, session_id: str, reason: str, **kwargs: Any) -> bool:
+        return await self._live().close(session_id, reason, **kwargs)
+
+    def add_listener(
+        self, session_id: str, callback: Callable[[str, dict[str, Any]], Any]
+    ) -> bool:
+        entry = self._live().entry(session_id)
+        if entry is None:
+            return False
+        entry.listeners.append(callback)
+        return True
+
+    async def close_steer_window(self, session_id: str, reason: str) -> bool:
+        return await self._live().close_steer_window(session_id, reason)
+
+    async def steer(self, session_id: str, text: str, **kwargs: Any) -> Any:
+        live = self._live()
+        entry = live.entry(session_id)
+        if entry is not None and live.is_idle(entry.state):
+            # Between turns there is nothing to steer: "no running turn",
+            # and the queue path writes it as the next turn.
+            return None
+        return await self._gate().steer(session_id, text, **kwargs)
+
+    async def wait_for_handoff(self, session_id: str, timeout_s: float) -> Any:
+        return await self._live().wait_for_handoff(session_id, timeout_s)
+
+
+# Static on purpose: no entry points until a fourth engine needs one.
 _BACKENDS: dict[str, LiveSessionBackend] = {
     "claude": _ClaudeLive(),
     "codex": _CodexLive(),  # #964
+    "antigravity": _AgyLive(),  # #977
 }
 
 
@@ -351,10 +472,11 @@ def live_backend(engine: str | None) -> LiveSessionBackend | None:
 
 
 # #981: engines that can take a mid-turn message without a live process.
-# Antigravity's steer goes through its gate hook (``PreInvocation
-# .injectSteps``) into whichever one-shot run is in flight, so it is a steer
-# target only — never a live-session backend (the bridge's live-session
-# paths must not see it). Resolved lazily: the module imports the registry.
+# Antigravity's steer went through its gate hook (``PreInvocation
+# .injectSteps``) this way until #977 registered its live backend, which
+# delegates steer to the same gate; ``steer_backend`` checks the live
+# backend first, so this entry is now only the fallback shape. Resolved
+# lazily: the module imports the registry.
 _STEER_ONLY: dict[str, tuple[str, str]] = {
     "antigravity": ("untether.antigravity.gate_server", "STEER_BACKEND"),
 }

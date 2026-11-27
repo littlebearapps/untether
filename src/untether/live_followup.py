@@ -10,7 +10,7 @@ live process, closing, an engine with no live-session backend) falls back to
 the unchanged resume path.
 
 The engine's registry is reached through :mod:`untether.live_sessions`
-(#977); Claude and Codex app-server (#964) are the backends.
+(#977); Claude, Codex app-server (#964) and Antigravity are the backends.
 """
 
 from __future__ import annotations
@@ -184,13 +184,23 @@ async def inject_live_followup(
         in_flight=True,
         engine=backend.engine,
     )
+    extra: dict[str, Any] = {} if cancel is None else {"cancel": cancel}
+    if options_for is not None and getattr(backend, "rechecks_before_write", False):
+        # Antigravity (#977 review H1): the wait can span a whole turn, so the
+        # options are compared again just before the write.
+        spawned_with = backend.spawn_options(session_id)
+
+        async def recheck() -> bool:
+            try:
+                return await options_for(job) == spawned_with
+            except Exception:  # noqa: BLE001 — unknown options: don't write
+                return False
+
+        extra["recheck"] = recheck
     ok = False
     try:
         ok = await backend.inject_when_idle(
-            session_id,
-            job.text,
-            command_uuid=command_uuid,
-            **({} if cancel is None else {"cancel": cancel}),
+            session_id, job.text, command_uuid=command_uuid, **extra
         )
     finally:
         settle_followup_anchor(command_uuid, written=ok)
