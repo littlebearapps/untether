@@ -805,7 +805,7 @@ same conversation with `--conversation=<id>`. Idle and option closes post nothin
 |---|---|
 | `idle_no_tasks` | Idle for `[watchdog] post_result_limbo_grace` (60 s), the same grace Claude uses |
 | `abs_cap` | `[watchdog] live_session_max_s` from spawn, deferred to the turn boundary (`antigravity.live_session.abs_cap_deferred`) |
-| `options_changed` / `context_changed` | The chat's model, effort, permission mode or project changed: the warm process closes before the follow-up, which spawns with the new options |
+| `options_changed` / `context_changed` | The chat's model, effort, permission mode or project changed, or `[antigravity] permission_mode` was hot-reloaded: the warm process closes before the follow-up, which spawns with the new options. The options are checked when the follow-up is queued and again just before the write, so a switch to Ask me or Plan first while the follow-up waits for a turn to end never runs in the warm process |
 | `config_changed` | The planted-config re-scan after a turn (or before a follow-up) found a change: the ⚠️ rows show and the process closes, because agy loaded its hooks, plugins and agents at spawn |
 | `gate_not_ready` | The run's gate stopped answering between turns |
 | `continue` | `/continue` in the same directory closes the idle process before it resolves, so two `agy` processes never hold the conversation |
