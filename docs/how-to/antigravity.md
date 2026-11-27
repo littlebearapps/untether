@@ -467,7 +467,7 @@ starts agy again on the same conversation, as before.
 live_sessions = true
 ```
 
-The setting is picked up without a restart. Each warm chat holds one agy process of about 270 MB.
+With `watch_config = true` the setting is picked up without a restart; otherwise restart Untether after changing it. Each warm chat holds one agy process of about 270 MB.
 
 - **Ask me, Plan first, scheduled runs and `/compact` always start agy afresh**, with the setting on or off.
 - **Changing the chat's model, effort, permission mode or project** closes the warm process; your message then

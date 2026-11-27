@@ -766,8 +766,8 @@ drained steer queue, a pre-claimed step number, a used-up card budget), never gr
 ## Live sessions
 
 [#977](https://github.com/littlebearapps/untether/issues/977), 0.36.2rc6. **Opt-in, off by default:**
-`live_sessions = true` under `[antigravity]` (or `[engines.antigravity]`). It hot-reloads: the next run reads it,
-and a process already warm stays until it closes.
+`live_sessions = true` under `[antigravity]` (or `[engines.antigravity]`). With `watch_config = true` it
+hot-reloads (the next run reads it, and a process already warm stays until it closes); otherwise restart Untether.
 
 With the switch on, a Workspace or Full access chat run keeps its `agy` process after the answer, with stdin open.
 A follow-up sent while it is idle is written to that stdin as another `{"event":"user",…}` line, so it runs as the
@@ -787,6 +787,7 @@ check>`):
 | Plan first | No: Approve resumes under a different `--mode` anyway | `mode_plan` |
 | Cron or webhook | No: nothing to keep warm | `unattended` |
 | `/compact` | No: it needs a process without `--disable-slash-commands` | `compact` |
+| Ask me under a trusted config (#1032) | No: trust is per run and the post-run re-scan revokes it (in practice `mode_ask` fails first) | `trusted_config` |
 
 **Turns.** The first `result` is the run's only `CompletedEvent`. Each later turn is
 `TurnEvent(started)` at its `user_input` step (`antigravity.live_session.turn_started`), the usual actions, and
@@ -805,7 +806,7 @@ same conversation with `--conversation=<id>`. Idle and option closes post nothin
 |---|---|
 | `idle_no_tasks` | Idle for `[watchdog] post_result_limbo_grace` (60 s), the same grace Claude uses |
 | `abs_cap` | `[watchdog] live_session_max_s` from spawn, deferred to the turn boundary (`antigravity.live_session.abs_cap_deferred`) |
-| `options_changed` / `context_changed` | The chat's model, effort, permission mode or project changed, or `[antigravity] permission_mode` was hot-reloaded: the warm process closes before the follow-up, which spawns with the new options. The options are checked when the follow-up is queued and again just before the write, so a switch to Ask me or Plan first while the follow-up waits for a turn to end never runs in the warm process |
+| `options_changed` | The chat's model, effort, permission mode or project changed (a project change also logs `antigravity.live_session.context_changed`), or `[antigravity] permission_mode` was hot-reloaded: the warm process closes before the follow-up, which spawns with the new options. The options are checked when the follow-up is queued and again just before the write, so a switch to Ask me or Plan first while the follow-up waits for a turn to end never runs in the warm process |
 | `config_changed` | The planted-config re-scan after a turn (or before a follow-up) found a change: the ⚠️ rows show and the process closes, because agy loaded its hooks, plugins and agents at spawn |
 | `gate_not_ready` | The run's gate stopped answering between turns |
 | `continue` | `/continue` in the same directory closes the idle process before it resolves, so two `agy` processes never hold the conversation |
