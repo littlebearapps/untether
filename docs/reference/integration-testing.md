@@ -2152,6 +2152,8 @@ Use a dummy config, never the real one with `--show-secrets`.
 
 ## 0.36.2rc6 scenarios
 
+0.36.2rc6 adds the Codex app-server nested-repo trust fix (#1408, PR [#1415](https://github.com/littlebearapps/untether/pull/1415)), the rc6 bug sweep (#1409–#1412, PR [#1416](https://github.com/littlebearapps/untether/pull/1416)), the session compaction count (#1182, PRs [#1417](https://github.com/littlebearapps/untether/pull/1417) and [#1418](https://github.com/littlebearapps/untether/pull/1418)), Codex app-server live sessions, steer and `/compact` (#964, PRs [#1419](https://github.com/littlebearapps/untether/pull/1419), [#1420](https://github.com/littlebearapps/untether/pull/1420), [#1422](https://github.com/littlebearapps/untether/pull/1422), [#1426](https://github.com/littlebearapps/untether/pull/1426) and [#1427](https://github.com/littlebearapps/untether/pull/1427)), Antigravity "Trust current config" for Ask me (#1032, PR [#1421](https://github.com/littlebearapps/untether/pull/1421)) and Antigravity live sessions behind `[antigravity] live_sessions`, off by default (#977, PRs [#1423](https://github.com/littlebearapps/untether/pull/1423), [#1424](https://github.com/littlebearapps/untether/pull/1424), [#1428](https://github.com/littlebearapps/untether/pull/1428) and [#1429](https://github.com/littlebearapps/untether/pull/1429)). Chats: Claude `-5284581592`, Codex `-4929463515`, OpenCode `-5200822877`, Pi `-5156256333`, Antigravity `-5540298446`.
+
 ### Session compaction count (#1182)
 
 Both phases: 1182-1 (core + Claude) and 1182-2 (Codex app-server, Pi, Antigravity). Logs:
@@ -2201,3 +2203,5 @@ and AG-1 with the switch off, all PASS. A `/cancel` mid-turn logs no `antigravit
 run ended, not an Untether close); that is expected.
 
 **Required for #977:** AG-62…AG-69, B-LIVE-1, B-LIVE-3 and AG-1 with the switch off.
+
+**Required for 0.36.2rc6:** the Minor tiers (Tier 7, Tier 1 on all five supported engines, Tier 2 C1, C2, C4 and C6), CX-1…CX-10 with Tier 1 on Codex over both transports, and every R362 rc6 row above. Per issue: #1408 CX-41 a–e and CX-11; #1409–#1411 C1, C2, C4, S9, T8, S7, T2, T3, R15-2a–d, R362-1266 and AG-14f; #1412 CX-11 (gates item 1), TR-1412a–c and TR-1125c; #1182 R362-1182a–i, R15-19c and R15-19e (R362-1182j optional); #964 CX-22…CX-30 on `transport = "app-server"` plus B-LIVE-1…B-LIVE-7 on Claude; #1032 AG-61, AG-61b…AG-61h and the AG-49, AG-50, AG-54, AG-56 and AG-57 regressions; #977 AG-62…AG-69 with `[antigravity] live_sessions = true` and AG-1 with it off. Log sweep: `journalctl --user -u untether-dev --since "<start>" -o cat | grep -E "WARNING|ERROR|Traceback"` shows only the lines the rows provoke on purpose.
