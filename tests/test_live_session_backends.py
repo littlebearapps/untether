@@ -423,3 +423,63 @@ async def test_agy_followup_injected_then_idle_close(
     ]
     assert turns[0].command_uuid == inj["command_uuid"]
     assert live_backend("antigravity").get(CID) is None
+
+
+@pytest.mark.anyio
+async def test_agy_options_changed_during_the_wait_closes_instead_of_writing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#977 review H1, through ``inject_live_followup``: the options match
+    when the follow-up is queued, then the chat switches (e.g. to Ask me)
+    before the write. The re-check under the lock closes the warm process,
+    so the message resumes one-shot under the new mode."""
+    import anyio
+    import structlog.testing
+
+    from tests.test_antigravity_live import CID, WarmRun, _is_completed, _runner
+    from untether.antigravity import live as agy_live
+    from untether.live_followup import inject_live_followup
+    from untether.model import ResumeToken
+    from untether.runners import antigravity as agy
+    from untether.scheduler import ThreadJob
+    from untether.utils.paths import reset_run_base_dir, set_run_base_dir
+
+    monkeypatch.setattr(agy, "_probe_agy_version", agy._run_agy_version)
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_WARM", "1")
+    monkeypatch.setenv("UNTETHER_FAKE_AGY_SCENARIO", "warm_two_turns")
+    monkeypatch.setattr(agy_live, "POLL_S", 0.05)
+    _agy_config(tmp_path, monkeypatch, on=True)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    token = set_run_base_dir(proj)
+    job = ThreadJob(
+        chat_id=1,
+        user_msg_id=2,
+        text="Reply TWO",
+        resume_token=ResumeToken(engine="antigravity", value=CID),
+    )
+    calls: list[int] = []
+
+    async def options_for(_job: object) -> object:
+        calls.append(1)
+        return None if len(calls) == 1 else "ask"  # spawned with None
+
+    run = WarmRun(_runner())
+    injected: list[bool] = []
+    try:
+        with structlog.testing.capture_logs() as logs:
+            with anyio.fail_after(30):
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(run.consume, "ONE")
+                    await run.until(_is_completed)
+                    injected.append(
+                        await inject_live_followup(job, options_for=options_for)
+                    )
+                    await run.done.wait()
+    finally:
+        reset_run_base_dir(token)
+
+    assert injected == [False] and len(calls) == 2
+    assert not [e for e in logs if e["event"] == "antigravity.live_session.injected"]
+    (closed,) = [e for e in logs if e["event"] == "antigravity.live_session.closed"]
+    assert closed["reason"] == "options_changed"

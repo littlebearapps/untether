@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +59,9 @@ class WarmEntry:
     state: Any  # AntigravityStreamState
     spawn_options: Any = None
     spawn_cwd: Path | None = None
+    # ``[antigravity] permission_mode`` at spawn: a chat with no override
+    # follows it, so its hot-reload is an options change too (review H2).
+    toml_mode: Any = None
     spawned_at: float = field(default_factory=time.monotonic)
     idle_grace_s: float = 60.0
     max_s: float = 14400.0
@@ -98,22 +102,30 @@ def _live_settings() -> tuple[float, float]:
     return grace, cap
 
 
-def switch_on() -> bool:
-    """``[antigravity] live_sessions``, read per call (hot-reloads; a run
-    already warm keeps its process until it closes)."""
+def _engine_key(key: str, default: Any) -> Any:
+    """One ``[antigravity]`` key, read per call (hot-reloads); *default*
+    only when the config can't be read."""
     try:
         from ..settings import load_settings_if_exists
 
         loaded = load_settings_if_exists()
         if loaded is None:
-            return False
+            return None  # no config file: every key unset
         settings, path = loaded
-        return (
-            settings.engine_config("antigravity", config_path=path).get("live_sessions")
-            is True
-        )
+        return settings.engine_config("antigravity", config_path=path).get(key)
     except Exception:  # noqa: BLE001
-        return False
+        return default
+
+
+def switch_on() -> bool:
+    """``[antigravity] live_sessions``, read per call (hot-reloads; a run
+    already warm keeps its process until it closes)."""
+    return _engine_key("live_sessions", False) is True
+
+
+def _toml_mode() -> Any:
+    # Unreadable → a sentinel never equal to a spawn-time value: fail closed.
+    return _engine_key("permission_mode", object())
 
 
 # -- registry -----------------------------------------------------------------
@@ -126,6 +138,7 @@ def register(runner: Any, state: Any, *, options: Any, cwd: Path | None) -> Warm
         state=state,
         spawn_options=options,
         spawn_cwd=cwd,
+        toml_mode=_toml_mode(),
         idle_grace_s=grace,
         max_s=cap,
     )
@@ -336,13 +349,18 @@ async def inject_when_idle(
     command_uuid: str,
     poll_s: float | None = None,
     cancel: Any = None,
+    recheck: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool:
     """Queue semantics: wait until the warm session is between turns, then
     write ``text`` as one more ``user`` line (``send_followup``: stdin only,
     never argv). False: the caller keeps the message for the resume path.
     agy's own ``/compact`` can't run in a process started with
     ``--disable-slash-commands`` (§5.4), and a changed config can't take a
-    follow-up: both close the idle session so the message resumes one-shot."""
+    follow-up: both close the idle session so the message resumes one-shot.
+    ``recheck`` (the caller's chat-options comparison) and the TOML mode run
+    again under the lock, just before the write: the wait can span a whole
+    turn, and a switch to Ask me or Plan first meanwhile must not run in this
+    process (review H1/H2)."""
     close_reason = "error"
     compact = native_compact_prompt(text) is not None
     while True:
@@ -361,6 +379,11 @@ async def inject_when_idle(
                         break
                     if await _config_changed(e):
                         close_reason = "config_changed"
+                        break
+                    if _toml_mode() != e.toml_mode or (
+                        recheck is not None and not await recheck()
+                    ):
+                        close_reason = "options_changed"
                         break
                     if cancel is not None and not cancel.claim():
                         return False  # #935: cancelled from its queued card
@@ -445,7 +468,11 @@ async def _tick(e: WarmEntry) -> None:
     state = e.state
     if e.closing:
         proc = state.warm_proc
-        since = e.closed_at if e.closed_at is not None else now
+        if e.closed_at is None:
+            # A close straight from the runner (``close_warm`` after a
+            # turn's re-scan) sets no deadline: start it now (review M1).
+            e.closed_at = now
+        since = e.closed_at
         if (
             not e.escalated
             and proc is not None

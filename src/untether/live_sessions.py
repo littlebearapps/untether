@@ -347,6 +347,8 @@ class _AgyLive:
     engine = "antigravity"
     display_name = "Antigravity"
     log_ns = "antigravity"
+    # live_followup passes a chat-options ``recheck`` for the write (review H1).
+    rechecks_before_write = True
 
     @staticmethod
     def _live() -> ModuleType:

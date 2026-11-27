@@ -860,3 +860,79 @@ async def test_dead_gate_closes_instead_of_taking_a_followup(
 
     await _drive(runner, body)
     assert reasons == ["gate_not_ready"]
+
+
+@pytest.mark.anyio
+async def test_options_recheck_at_write_time_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+) -> None:
+    """Review H1: the chat's options are compared before the wait, but the
+    wait can span a whole turn. A switch to Ask me or Plan first meanwhile
+    must not let the follow-up run in the old (Full access) process: the
+    caller's re-check runs under the lock, just before the write."""
+    runner = _runner()
+    out: list[bool] = []
+
+    async def stale() -> bool:
+        return False
+
+    async def body(run: WarmRun) -> None:
+        out.append(
+            await agy_live.inject_when_idle(CID, "TWO", command_uuid="f", recheck=stale)
+        )
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "options_changed"
+
+
+@pytest.mark.anyio
+async def test_toml_permission_mode_change_closes_instead_of_injecting(
+    project: Path,  # noqa: F811
+    warm: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review H2: a chat with no override follows ``[antigravity]
+    permission_mode``; its hot-reload (Full access → Ask me) leaves the chat
+    options unchanged, so the warm entry remembers the TOML mode it was
+    spawned under and closes when it differs."""
+    mode = {"value": "full"}
+    monkeypatch.setattr(agy_live, "_toml_mode", lambda: mode["value"])
+    runner = _runner()
+    out: list[bool] = []
+
+    async def body(run: WarmRun) -> None:
+        mode["value"] = "ask"
+        out.append(await agy_live.inject_when_idle(CID, "TWO", command_uuid="f"))
+
+    with structlog.testing.capture_logs() as logs:
+        await _drive(runner, body)
+    assert out == [False] and _stdin_lines(warm) == ["ONE"]
+    (closed,) = _ev(logs, "antigravity.live_session.closed")
+    assert closed["reason"] == "options_changed"
+
+
+@pytest.mark.anyio
+async def test_direct_close_still_escalates_after_the_exit_grace() -> None:
+    """Review M1: ``close_warm`` called straight from the runner (the
+    post-turn ``config_changed`` close) sets no ``closed_at``; the lifecycle
+    stamps it, so a process that ignores stdin EOF still gets SIGTERM."""
+    proc = SimpleNamespace(returncode=None, terminated=0)
+    proc.terminate = lambda: setattr(proc, "terminated", proc.terminated + 1)
+    state = SimpleNamespace(
+        warm_closing="config_changed", warm_proc=proc, session_id=CID
+    )
+    entry = agy_live.register(None, state, options=None, cwd=None)
+    try:
+        await agy_live._tick(entry)
+        assert entry.closed_at is not None and proc.terminated == 0
+        entry.closed_at -= agy_live.EXIT_GRACE_S + 1
+        with structlog.testing.capture_logs() as logs:
+            await agy_live._tick(entry)
+    finally:
+        agy_live._ENTRIES.remove(entry)
+    assert proc.terminated == 1 and entry.escalated
+    assert len(_ev(logs, "antigravity.live_session.close_escalated")) == 1
