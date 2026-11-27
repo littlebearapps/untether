@@ -2163,6 +2163,7 @@ class CodexAppServerRunner(CodexRunner):
         if not (state.live_mode and state.completed_turns):
             return []
         state.ctx_emitted = None  # re-show % ctx for this turn
+        state.compactions = 0  # per turn: else later turns log "auto" (#964)
         state.idle_since = None
         wait = state.pending_start
         reason, command_uuid = "unknown", None
