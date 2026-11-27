@@ -63,8 +63,8 @@ runner.** Security and doc-accuracy fixes still apply. Both are excluded from ev
 - **Antigravity CLI** (`antigravity`, #558) is its own engine from v0.36.1 and must never reuse the `gemini` id. The
   permission mode is chosen before the run: Workspace (default; no-shell agent), Plan first (agy plan mode + Approve
   Plan card), Full access (bypass), or Ask me (bypass only once Untether's agy-gate plugin is ready; the gate also
-  carries question buttons and steer). One `agy` process per message: warm/live agy sessions are deferred (#977
-  shipped only the `live_sessions.py` seam). Every value that reaches `agy`'s argv goes through
+  carries question buttons and steer). One `agy` process per message unless `[antigravity] live_sessions = true`
+  (#977, off by default: Workspace and Full access chat runs keep a warm process). Every value that reaches `agy`'s argv goes through
   `utils/antigravity_argv.py` (`--flag=value` only). Detail: the `antigravity-cli` skill.
 - **Codex app-server** (v0.36.2, #1112) is not a new engine: it stays the `codex` id, chosen per install by
   `[engines.codex] transport = "exec" | "app-server"` (#962, from 0.36.2rc2: rows, cancel via

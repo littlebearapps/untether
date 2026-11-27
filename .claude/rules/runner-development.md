@@ -81,7 +81,7 @@ Every run MUST emit exactly this sequence:
 2. `ActionEvent(s)` — zero or more, phase: started/updated/completed
 3. `CompletedEvent` — exactly once per run, always the run's final event
 
-After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** the runner keeps its process live (#776): it sets `JsonlStreamState.followup_turns = True` and each later turn in the same process is a bracketed segment `TurnEvent(started) → ActionEvent* → TurnEvent(completed)`, built with `EventFactory.turn_started` / `turn_completed`. Never emit a second `CompletedEvent`. Only `ClaudeRunner` in control-channel mode opts in (kill switch `[watchdog] live_sessions`); every other runner keeps the drop-after-completed behaviour. A runner that reads past the result must keep the #505 inherited-fd protection — `_subprocess_watchdog` does it for opt-in runners (2 s post-exit drain, then close our stdout read end).
+After emitting `CompletedEvent`, drop all subsequent JSONL lines — **unless** the runner keeps its process live (#776): it sets `JsonlStreamState.followup_turns = True` and each later turn in the same process is a bracketed segment `TurnEvent(started) → ActionEvent* → TurnEvent(completed)`, built with `EventFactory.turn_started` / `turn_completed`. Never emit a second `CompletedEvent`. Opted in: `ClaudeRunner` in control-channel mode (kill switch `[watchdog] live_sessions`), Codex app-server (#964) and Antigravity behind `[antigravity] live_sessions` (#977); every other runner keeps the drop-after-completed behaviour. A runner that reads past the result must keep the #505 inherited-fd protection — `_subprocess_watchdog` does it for opt-in runners (2 s post-exit drain, then close our stdout read end).
 
 ## Stream state tracking
 

@@ -87,7 +87,8 @@ see the notice once. Shown chats are remembered in `antigravity_notices.json` be
 
 ## How a run is started
 
-One `agy` process per message:
+One `agy` process per message, unless `[antigravity] live_sessions` is on (then a Workspace or Full access chat
+keeps one warm process between messages, see [Live sessions](#live-sessions)):
 
 ```text
 agy --input-format stream-json --output-format stream-json --print-timeout 0 [--disable-slash-commands]
@@ -96,7 +97,8 @@ agy --input-format stream-json --output-format stream-json --print-timeout 0 [--
      | --dangerously-skip-permissions)
 ```
 
-- **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed.
+- **The prompt goes on stdin**, as one line `{"event":"user","message":{"content":"…"}}`, and stdin is then closed
+  (a warm process keeps it open and gets each follow-up as another such line).
   It is never on the command line, so it can't be read from the process list or mistaken for a flag.
 - `--disable-slash-commands` makes a prompt that starts with `/` an ordinary message. Untether adds no prefix.
   Two runs go without the flag: Plan first, which escapes a `/`-leading prompt itself (see
@@ -734,7 +736,8 @@ skips it in headless runs, so the subagent carries on ([#1156](https://github.co
 ### Steer
 
 With Follow-up = steer (or `/steer <text>`), a message for a chat whose agy run is in flight and hasn't sent its
-result is queued on the run (`live_sessions.steer_backend`: a steer-only target, not a live session) and acknowledged
+result is queued on the run (`live_sessions.steer_backend`: the steer-only target for a one-shot run, or the
+`_AgyLive` backend for a warm process, which hands it to the same gate queue) and acknowledged
 `↪️ Steered into the current run.` The next `PreInvocation` for the run's own conversation (never a subagent's)
 answers `{"injectSteps":[{"userMessage":"Message from the user, sent via Telegram while you were working: …"}]}`,
 at most eight per call (`antigravity.steer.injected`). Each injected message appears as one `user_input` step
@@ -742,7 +745,8 @@ at most eight per call (`antigravity.steer.injected`). Each injected message app
 `↪️ steer received: …` row; it never starts a turn. A steer still queued or not seen when agy sends its result gets
 the bridge's `⚠️ The session ended before this message ran — please send it again.` (so does `/cancel`), logged as
 `antigravity.steer.not_run` ([#1083](https://github.com/littlebearapps/untether/issues/1083); Claude's equivalent is
-`claude.live_session.followup_not_run`).
+`claude.live_session.followup_not_run`). In a warm process the steer window opens at each turn's `user_input` step
+and closes at that turn's `result`, so a steer only ever reaches the turn that is running.
 
 ### Liveness, tripwire, `Stop`
 
@@ -758,6 +762,76 @@ Same-uid caveat (narrowed, not closed): agy's tool processes inherit its env (ag
 them) and are agy's direct children, so a command the user already allowed could read the socket path and token and
 exec the hook's own command line to pass the peer check. It can only *ask* (a spoofed question or approval card, a
 drained steer queue, a pre-claimed step number, a used-up card budget), never grant itself a tool. See [Security](../../../how-to/security.md#antigravity-telegram-questions-and-steer).
+
+## Live sessions
+
+[#977](https://github.com/littlebearapps/untether/issues/977), 0.36.2rc6. **Opt-in, off by default:**
+`live_sessions = true` under `[antigravity]` (or `[engines.antigravity]`). With `watch_config = true` it
+hot-reloads (the next run reads it, and a process already warm stays until it closes); otherwise restart Untether.
+
+With the switch on, a Workspace or Full access chat run keeps its `agy` process after the answer, with stdin open.
+A follow-up sent while it is idle is written to that stdin as another `{"event":"user",…}` line, so it runs as the
+next turn of the same process. It skips the spawn, Untether's pre-run checks (only the planted-config re-scan runs
+again) and agy's start-up to `init` (1.7–1.9 s on agy 1.5.17); a short reply took 3.2 s warm against about 10 s cold
+on the dev bot. It replies to its own message with `✓ turn complete` in the footer. This is agy's own
+`--input-format stream-json` behaviour (see the register); the argv is unchanged.
+
+**Which runs go warm** (decided per spawn, `antigravity.live_session.eligible warm=<bool> reason=<first failed
+check>`):
+
+| Run | Warm? | `reason` |
+|---|---|---|
+| Workspace or Full access, attended | Yes | `ok` |
+| Switch off (the default) | No | none: no `eligible` line is logged |
+| Ask me | No: its safety rests on per-run liveness, the stepIdx tripwire and the approval timers | `mode_ask` |
+| Plan first | No: Approve resumes under a different `--mode` anyway | `mode_plan` |
+| Cron or webhook | No: nothing to keep warm | `unattended` |
+| `/compact` | No: it needs a process without `--disable-slash-commands` | `compact` |
+| Ask me under a trusted config (#1032) | No: trust is per run and the post-run re-scan revokes it (in practice `mode_ask` fails first) | `trusted_config` |
+
+**Turns.** The first `result` is the run's only `CompletedEvent`. Each later turn is
+`TurnEvent(started)` at its `user_input` step (`antigravity.live_session.turn_started`), the usual actions, and
+`TurnEvent(completed)` at its `result`. Per-turn state resets at each turn (answer text, held blocked steps,
+background map, footer tokens from that turn's own `agent_response` steps); `step_index` keeps counting. A
+follow-up is written only between turns and after the turn's planted-config re-scan
+(`antigravity.live_session.written`, then `antigravity.live_session.injected` from the bridge). A line written
+mid-turn would only be queued by agy, so Untether never does that; a steer still goes through the gate.
+
+**Closing.** Each close ends stdin and waits for exit code 0 (SIGTERM after a grace,
+`antigravity.live_session.close_escalated`); the log pair is `antigravity.live_session.closing reason=<r>` and
+`antigravity.live_session.closed reason=<r> turns=<n>`. Nothing is quarantined, and the next message resumes the
+same conversation with `--conversation=<id>`. Idle and option closes post nothing in the chat.
+
+| `reason` | When |
+|---|---|
+| `idle_no_tasks` | Idle for `[watchdog] post_result_limbo_grace` (60 s), the same grace Claude uses |
+| `abs_cap` | `[watchdog] live_session_max_s` from spawn, deferred to the turn boundary (`antigravity.live_session.abs_cap_deferred`) |
+| `options_changed` | The chat's model, effort, permission mode or project changed (a project change also logs `antigravity.live_session.context_changed`), or `[antigravity] permission_mode` was hot-reloaded: the warm process closes before the follow-up, which spawns with the new options. The options are checked when the follow-up is queued and again just before the write, so a switch to Ask me or Plan first while the follow-up waits for a turn to end never runs in the warm process |
+| `config_changed` | The planted-config re-scan after a turn (or before a follow-up) found a change: the ⚠️ rows show and the process closes, because agy loaded its hooks, plugins and agents at spawn |
+| `gate_not_ready` | The run's gate stopped answering between turns |
+| `continue` | `/continue` in the same directory closes the idle process before it resolves, so two `agy` processes never hold the conversation |
+| `compact` | `/compact` closes the idle process and runs one-shot |
+| (the command's own) | `/new`, an idle `/cancel` and drain at shutdown close it as they close a Claude live session |
+
+`/cancel` **during** a warm turn stops the process (SIGTERM, as for a one-shot run: agy has no turn-only interrupt);
+the final reads `cancelled`, the conversation is kept, and the next message resumes cold. An idle process that exits
+without Untether asking gets the engine-named died notice (`antigravity.live_session.died_unexpectedly`).
+
+**Gate.** The run's `GateRun` stays open for the process lifetime and closes when it exits; questions and held
+blocked steps are per turn. Steer works as in [Steer](#steer).
+
+**RAM.** A warm `agy` holds about 260–290 MB (agy 1.5.17). `idle_live_session_counts()` includes warm agy processes, so
+the pre-spawn RAM guard counts them.
+
+**Terminal fork caveat.** While a chat's process is warm, Untether routes that chat's follow-ups and `/continue` to it
+and holds the conversation's session lock, but it can't see a terminal. Running `agy --conversation <id>` (or `-r`) on
+the same conversation from a shell while the Telegram process is warm gives two processes writing one conversation.
+Wait for the idle close (60 s after the last answer), or send `/cancel` in the chat first.
+
+Live check 2026-11-27 (dev bot, agy 1.5.18, rows AG-62 to AG-69 in
+[integration testing](../../integration-testing.md#antigravity-live-sessions-977)): two prompts gave one spawn and a
+3.2 s second answer; idle close at 60 s with rc 0 and no process left; model change, `/cancel`, steer, `/continue`,
+`/compact`, Ask me, Plan first and a cron all behaved as above.
 
 ## Errors
 
@@ -1026,8 +1100,11 @@ Turn the block off with `[progress] show_background_tasks = false`.
 
 ## Known gaps
 
-- **No live sessions.** Approval cards are Ask me's ([Ask me](#ask-me)); Plan first has its own Approve / Deny /
-  Let's discuss card (see [Plan first](#plan-first)). Approval cards, question buttons and steer need
+- **Live sessions are opt-in and partial.** Off by default; when on, only Workspace and Full access chat runs stay
+  warm, there is no background hold (agy holds its own result for background work), no turn-only interrupt, and a
+  terminal `agy` on the same conversation can fork it (see [Live sessions](#live-sessions)). Approval cards are Ask
+  me's ([Ask me](#ask-me)); Plan first has its own Approve / Deny / Let's discuss card (see
+  [Plan first](#plan-first)). Approval cards, question buttons and steer need
   [Untether's agy gate](#untethers-agy-gate) on the host.
 - **Ask me in a project with agy config Untether doesn't manage** (other hook groups, `.agents/` plugins, MCP
   servers or agents, user-level plugins or MCP servers) needs a chat admin's **Trust current config**
@@ -1072,7 +1149,7 @@ rows give their own version and date (latest: agy 1.5.18, 2026-11-26).
 | agy 1.5.13 Workspace agent's list and search tools ([#1368](https://github.com/littlebearapps/untether/issues/1368)) | — (**gap**: agy 1.5.x has no list or search tool) | Probed 2026-11-22 on 1.5.13 with project-level test agents: `list_dir`, `find_by_name` and `grep_search` in a custom agent's `tools:` give the model nothing; `view_file` / `write_to_file` / `replace_file_content` / `multi_replace_file_content` become `read_file` / `write_file` / `edit_file`; the 1.5 names work directly, but naming both sets ends the run (`tool name conflict: multiple tools resolved with name "read_file"`). agy's own default agent shows the model no list or search tool either (it lists through `run_command`), and `init.tools` still prints the 1.3 names. So the agent file keeps the 1.3.x names (valid on every supported agy, 1.3.1 up) and its prompt names the 1.5 tools and says plainly that Workspace can't list or search; a listing needs Full access or Ask me (a shell command). Re-check when agy adds a list or search tool |
 | agy's Auto mode (`--mode auto`, 1.3.5, [#1091](https://github.com/littlebearapps/untether/issues/1091)) | — (no Untether mode uses it) | agy's changelog: Auto "approves file edits and safe commands without asking and still prompts before irreversible actions", and a separate agent reviews commands that would leave the terminal sandbox. **Workspace** can't map onto it: Workspace promises no shell, and Auto runs commands it judges safe. **Full access** can't either: Auto is narrower, and Full access is the user's explicit choice of everything. **Ask me** is the only candidate (approval cards for the risky calls only), but print mode can't prompt, so whatever Auto would ask about is denied (agy's stderr says to add an allow rule or use the bypass flag), and a hook `allow` can't grant a tool without the bypass flag (E1; unprobed under Auto), while Ask me's bypass runs pass no `--mode`. On lba-1's account (Google AI Pro) agy prints `warning: --mode auto is not available for this account; continuing in the default mode.` and runs in its **default** mode (stricter than Workspace: a probe's `echo` was denied, `denied_actions: command`), and `init.permission_mode` still says `request-review`, so the stream can't tell Auto from the fallback; only stderr can. `--mode` takes one value, so Auto can't combine with plan. `check_mode` refuses `auto`, and the drift suite fails when agy offers a `--mode` value nobody has reviewed. Unprobed: Auto on an account that has it, and agy's `agentMode` setting (`-p /config`, empty on lba-1) set to `auto` under Full access or Ask me, which pass no `--mode`. Checked 2026-10-15, agy 1.3.5 |
 | `/compact` (agy 1.3.5, [#1091](https://github.com/littlebearapps/untether/issues/1091), closed by [#1114](https://github.com/littlebearapps/untether/issues/1114)) | agy's own `/compact`: a `/compact` (or `/compact <message>`) prompt goes to the chat's conversation as the stream-json line itself, in a run without `--disable-slash-commands`; agy's `checkpoint` step plus its empty `SUCCESS` result is the confirmation (see [`/compact`](#compact)) | Usable headless: `agy -p /compact --conversation=<id>` and a stream-json `/compact` line both compact — a `checkpoint` step, then a `SUCCESS` result with an empty `response` and no new tokens; `-p` also prints `warning: run ended with no output and no recorded error`. Re-probed for #1114 with Untether's own Workspace argv (`--input-format stream-json --output-format stream-json --print-timeout 0 --conversation=<id> --mode=accept-edits --agent=untether-workspace`, no `--disable-slash-commands`): `user_input`, `system_message`, `checkpoint` (DONE, about 6 s), then `SUCCESS` with `response: ""`, rc 0, nothing on stderr (fixture `compact`). Neither route says how many steps were summarised or how much smaller the context got (TUI only), so the final has no token figure. Still custom: the no-conversation reply (agy would start a fresh conversation and compact nothing) and never steering it (the gate injects text). Not probed: `/compact` under `--mode=plan` and under the bypass flag (Ask me, Full access); compaction runs no tools, so neither mode should matter. Checked 2026-10-15, agy 1.3.5 |
-| Warm (live) sessions ([#977](https://github.com/littlebearapps/untether/issues/977)) | `--input-format stream-json` with stdin left open, already Untether's input format (`--help`: "reads one NDJSON message per line from stdin and runs a turn for each") | — (not built yet: one process per run, `live_sessions.py` is the seam; the #977 build keeps this native route). Probed 2026-11-26 on agy 1.5.17 (model `gemini-3.8-flash-low`, `--mode=accept-edits`): one process answers each `{"event":"user"}` line with one `result`, same pid and `conversation_id` in `init` and every `result`; `step_index` keeps counting across turns; `num_turns` and `usage` are conversation totals and keep growing in one process (turn 2 read 8 919 cache tokens), and `duration_seconds` is wall time since spawn, idle included. Each turn ends with its one `result`; the next starts with a `user_input` `DONE` step, with no other ready or idle signal. **Mid-turn lines (G14)**: a line written while a turn runs is neither rejected nor merged; agy queues it and runs it as its own turn straight after the current `result`, with `queuedMessages` at its default `queue` and with `--settings={"queuedMessages":"send-immediately"}` alike, in a thinking turn and in a multi-tool turn, so stdin is queue-only. Closing stdin while idle ends the process with rc 0 within a second, stderr empty. SIGINT mid-turn gives a `result` `ERROR` with `finished_reason: interrupted` and then ends the whole process (rc 1): there is no turn-only interrupt, and stdin control messages exit rc 2 (row below). Cost: spawn to `init` 1.66–1.90 s over four runs; idle RSS 261–271 MB after one turn, 282–290 MB after four (one process, no children). A `/compact` line works too if `--disable-slash-commands` is left off. agy 1.5.18 (self-updated 2026-11-27): `--help` text for `--input-format` unchanged and its changelog has no stream-json entry; the turn probes were not re-run. Checked 2026-11-27, agy 1.5.17 (probes) and 1.5.18 (`--help`, changelog) |
+| Warm (live) sessions ([#977](https://github.com/littlebearapps/untether/issues/977)) | `--input-format stream-json` with stdin left open, already Untether's input format (`--help`: "reads one NDJSON message per line from stdin and runs a turn for each") | — (**built**, 0.36.2rc6: `[antigravity] live_sessions`, default off; Workspace and Full access chat runs only; see [Live sessions](#live-sessions). Dev-bot rows AG-62 to AG-69 passed 2026-11-27 on agy 1.5.18). Probed 2026-11-26 on agy 1.5.17 (model `gemini-3.8-flash-low`, `--mode=accept-edits`): one process answers each `{"event":"user"}` line with one `result`, same pid and `conversation_id` in `init` and every `result`; `step_index` keeps counting across turns; `num_turns` and `usage` are conversation totals and keep growing in one process (turn 2 read 8 919 cache tokens), and `duration_seconds` is wall time since spawn, idle included. Each turn ends with its one `result`; the next starts with a `user_input` `DONE` step, with no other ready or idle signal. **Mid-turn lines (G14)**: a line written while a turn runs is neither rejected nor merged; agy queues it and runs it as its own turn straight after the current `result`, with `queuedMessages` at its default `queue` and with `--settings={"queuedMessages":"send-immediately"}` alike, in a thinking turn and in a multi-tool turn, so stdin is queue-only. Closing stdin while idle ends the process with rc 0 within a second, stderr empty. SIGINT mid-turn gives a `result` `ERROR` with `finished_reason: interrupted` and then ends the whole process (rc 1): there is no turn-only interrupt, and stdin control messages exit rc 2 (row below). Cost: spawn to `init` 1.66–1.90 s over four runs; idle RSS 261–271 MB after one turn, 282–290 MB after four (one process, no children). A `/compact` line works too if `--disable-slash-commands` is left off. agy 1.5.18 (self-updated 2026-11-27): `--help` text for `--input-format` unchanged and its changelog has no stream-json entry; the turn probes were not re-run. Checked 2026-11-27, agy 1.5.17 (probes) and 1.5.18 (`--help`, changelog) |
 | Footer tokens for one run | `step_update.usage` on the run's `agent_response` steps, summed | `result.usage` is the conversation's running total; its difference also counts a cancelled run that never reported a result. The sum matched the difference exactly on every capture. Checked 2026-10-13, agy 1.3.3, [#1062](https://github.com/littlebearapps/untether/issues/1062) |
 | Showing an answer held for background work | Partly native: with the gate, the `Stop` hook's `fullyIdle: false` says the model has finished its turn and agy is waiting (the `⏳ background` note says so); the text itself is a **gap** | Nothing is printed during the hold; a SIGTERM during it gives `result.response: ""` though the model call ran; `Stop` carries no text (and a timer can still start another model call, probe pb2). The text is only in `transcript_full.jsonl` (rule 3, not read). Checked 2026-10-13, agy 1.3.3/1.3.4, [#1061](https://github.com/littlebearapps/untether/issues/1061) |
 | Questions in Telegram ([#980](https://github.com/littlebearapps/untether/issues/980)) | agy's own `ask_question` tool, answered through a `PreToolUse` hook (`deny` + a reason that carries the answer, E3); the hook is installed with `agy plugin install` | Partly **custom**: headless agy skips `ask_question` and has no answer channel but a hook. The hook command, socket and plugin files are Untether's. Checked 2026-10-13, agy 1.3.3/1.3.4 |
@@ -1112,6 +1189,7 @@ model = "gemini-3.8-flash"     # optional; passed as --model=<id>
 cmd = "~/.local/bin/agy"       # optional; default: agy on PATH, then ~/.local/bin/agy
 permission_mode = "workspace"  # workspace (default) | ask | plan | full
 approval_timeout_s = 900       # optional; Ask me's approval wait, 60-3000 s, never longer than the plugin's
+live_sessions = false          # optional; true keeps agy warm between messages (Workspace / Full access chats, #977)
 ```
 
 See the [config reference](../../config.md#antigravity). Unknown keys are ignored.
@@ -1143,7 +1221,11 @@ See the [config reference](../../config.md#antigravity). Unknown keys are ignore
 (a command still running when the answer arrived), `antigravity.quota.fetched` / `.failed`,
 `antigravity.credits.fetched` / `.failed`, `antigravity.context.window_miss` (DEBUG, once per run: the model has
 no known window) / `.over_window` (WARN: more tokens than the table's window, shown as 100 %). `runner.completed`
-carries `context_pct` when a percentage was shown.
+carries `context_pct` when a percentage was shown. Live sessions (#977): `antigravity.live_session.eligible` (`warm`,
+`reason`), `.written` (`command_uuid`, `queued`), `.injected` (from `live_followup`), `.turn_started`, `.closing` /
+`.closed` (`reason`, `turns`), `.continue_closed`, `.options_changed`, `.inject_unavailable`, `.config_changed`,
+`.steer_window_closed`, `.abs_cap_deferred`, `.close_escalated`, `.followup_turn_timeout`, `.died_unexpectedly`
+(WARN), `.listener_failed`, `.settings_load_failed`.
 
 ## See also
 

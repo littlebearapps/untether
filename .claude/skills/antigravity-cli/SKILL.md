@@ -5,7 +5,8 @@ description: >
   (utils/antigravity_argv.py), the four permission modes (Workspace, Plan first,
   Full access, Ask me), Untether's agy-gate plugin (approvals, questions, steer),
   stream-json events and their translation, resume and /continue, errors and
-  redaction, and the gotchas. agy runs one process per message (no live sessions).
+  redaction, live sessions (opt-in warm process, antigravity/live.py), and the
+  gotchas. Without [antigravity] live_sessions, agy runs one process per message.
 triggers:
   - working on Antigravity runner code (runners/antigravity.py, utils/antigravity_*.py)
   - working on the agy gate (src/untether/antigravity/)
@@ -159,7 +160,11 @@ Every line has `event`: `init`, `step_update`, `result`, `command_result`. There
 - Every running `run_command` counts as possible background work after 5 s (the stream carries no
   `WaitMsBeforeAsync`); subagent completions are attributed FIFO unless a timer's output names the sender.
 - Daemon commands outlive the run; Untether stops only child processes it saw agy start.
-- No live/warm sessions (#977 left only the `live_sessions.py` seam); steer is a steer-only backend through the gate.
+- Live sessions (#977) are opt-in (`[antigravity] live_sessions`, default off) and only for attended Workspace / Full
+  access runs: Ask me, Plan first, crons, webhooks and `/compact` stay one-shot (`_warm_eligibility`). A follow-up is
+  written only between turns (agy queues a mid-turn line, it never steers); steer stays on the gate, through
+  `_AgyLive` when warm and the steer-only backend otherwise. No turn-only interrupt: `/cancel` mid-turn ends the
+  process. A terminal `agy --conversation <id>` on a warm conversation forks it; Untether can't guard that.
 - agy hooks, plugins, agents and MCP servers run in every mode without a tool call; the planted-config scan warns on
   first sight, holds crons on change, and re-checks after each run (tripwire, not sandbox).
 - Never read agy state files beyond the recorded exceptions (`last_conversations.json`, the Plan first artifact +

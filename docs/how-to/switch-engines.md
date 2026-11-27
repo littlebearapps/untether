@@ -122,7 +122,8 @@ buttons (Ask me), question buttons and `/steer` to Antigravity chats; see
     in Full access keeps its shell after you switch back. Send `/new`: the new mode applies from the next new
     conversation.
 
-Not available for Antigravity: live sessions (each message is its own agy run). If something goes wrong, see
+Live sessions are opt-in for Antigravity (`live_sessions = true` under `[antigravity]`, Workspace and Full access
+chats only; see [Use Antigravity CLI](antigravity.md#live-sessions)). If something goes wrong, see
 [Troubleshooting](troubleshooting.md#antigravity-cli).
 
 ## Feature differences

@@ -5,6 +5,11 @@ three-event contract: one `StartedEvent`, any number of `ActionEvent`s, exactly 
 are in the [stream-json cheatsheet](stream-json-cheatsheet.md). Checked against agy 1.3.2;
 the subagent, timer and background rows against 1.3.3.
 
+A warm process ([live sessions](runner.md#live-sessions), #977, opt-in) keeps reading after its first `result`, which
+is still the run's only `CompletedEvent`. Each later turn is a `TurnEvent(started)` at its `user_input` step (carrying
+the follow-up's command uuid), the usual `ActionEvent`s, and a `TurnEvent(completed)` at its `result`, built with
+`EventFactory.turn_started` / `turn_completed`; the rows below apply inside each turn.
+
 ## Mapping
 
 | agy line | Untether event |

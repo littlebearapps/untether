@@ -21,8 +21,11 @@ Untether starts agy with `--input-format stream-json` and writes one line to std
 ```
 
 agy runs one turn per line. With stdin left open it answers each line with its own `result` and then waits, idle,
-for the next; closing stdin ends it with exit code 0 (agy 1.3.5; the seam for live sessions,
-[#977](https://github.com/littlebearapps/untether/issues/977)). A `/compact` line, sent without
+for the next; closing stdin ends it with exit code 0 (agy 1.3.5). Untether's opt-in live sessions use exactly this
+([#977](https://github.com/littlebearapps/untether/issues/977), `[antigravity] live_sessions`; see the
+[runner reference](runner.md#live-sessions)).
+
+A `/compact` line, sent without
 `--disable-slash-commands`, compacts the conversation: a `system_message` step and a `checkpoint` step, then a
 `SUCCESS` result with an empty `response` and no new tokens. Nothing in the stream says how much smaller the context
 got (agy 1.3.5). Untether passes that flag (and escapes a leading `/` in Plan first) on every run except a
@@ -38,6 +41,33 @@ got (agy 1.3.5). Untether passes that flag (and escapes a leading `/` in Plan fi
 {"event":"step_update","step_update":{"conversation_id":"153b…","step_index":4,"state":"DONE","step_type":"checkpoint","duration_seconds":6.39104973}}
 {"event":"result","result":{"conversation_id":"153b…","status":"SUCCESS","response":"","duration_seconds":18.26,"num_turns":2,"usage":{"input_tokens":7803,"output_tokens":27,"thinking_tokens":26,"cache_read_tokens":0,"total_tokens":7830}}}
 ```
+
+### Several turns in one process
+
+Two lines on one stdin (probe P1, agy 1.5.17, `gemini-3.8-flash-low`; ids shortened, `init` trimmed). One `init`,
+then each turn opens with a `user_input` `DONE` step and ends with its own `result`. There is no other ready or idle
+signal between turns:
+
+```json
+{"event":"init","conversation_id":"4e1f…","init":{"model":"gemini-3.8-flash-low","cwd":"…","tools":["…"]}}
+{"event":"step_update","step_update":{"conversation_id":"4e1f…","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"4e1f…","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"\n","usage":{"input_tokens":10966,"output_tokens":1}}}
+{"event":"result","result":{"conversation_id":"4e1f…","status":"SUCCESS","response":"ONE\n","duration_seconds":3.09,"num_turns":1,"usage":{"input_tokens":10966,"output_tokens":1}}}
+{"event":"step_update","step_update":{"conversation_id":"4e1f…","step_index":2,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"4e1f…","step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"\n","usage":{"input_tokens":2130,"output_tokens":1}}}
+{"event":"result","result":{"conversation_id":"4e1f…","status":"SUCCESS","response":"TWO\n","duration_seconds":10.11,"num_turns":2,"usage":{"input_tokens":13096,"output_tokens":2}}}
+```
+
+- The pid and `conversation_id` stay the same; `step_index` keeps counting across turns (2, 3 above).
+- `num_turns` and `usage` are conversation totals and keep growing in one process; `duration_seconds` is wall time
+  since spawn, idle time included. Untether takes a turn's footer tokens from that turn's `agent_response` steps.
+- **A line written mid-turn (G14, probes P3 to P5)** is neither rejected nor merged into the running turn: agy queues
+  it and runs it as its own turn straight after the current `result`. That holds with `queuedMessages` at its
+  default `queue` and with `--settings={"queuedMessages":"send-immediately"}`, so stdin can queue but can't steer.
+  Untether writes a follow-up only between turns, and steers through the gate's `PreInvocation` hook.
+- Closing stdin while idle ends the process with rc 0 within a second. SIGINT mid-turn gives a `result` `ERROR` with
+  `finished_reason: interrupted` and then ends the whole process (rc 1): there is no turn-only interrupt, and a
+  stdin `control_request` exits rc 2.
 
 ## `init`
 
