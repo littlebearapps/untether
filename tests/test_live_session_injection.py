@@ -1593,7 +1593,9 @@ async def test_inject_live_followup_logs_use_engine_namespace(
         "source": "scheduler",
     }
     assert [(sid, text) for sid, text, _ in injected] == [("sid-inj", "again")] * 2
-    assert injected[-1][2] == {"command_uuid": command_uuid}
+    kwargs = dict(injected[-1][2])
+    assert callable(kwargs.pop("recheck"))  # #1433: re-checked before the write
+    assert kwargs == {"command_uuid": command_uuid}
     assert closes == []
 
 
