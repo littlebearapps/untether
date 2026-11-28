@@ -625,11 +625,17 @@ def approve_context(plan: PendingPlan) -> RunContext:
 # #965 plan-auto: the scheduler's ``enqueue_resume`` (installed by the
 # Telegram loop), so the bridge can queue the approved run with no tap.
 _ENQUEUE: Callable[..., Awaitable[None]] | None = None
+_RESOLVE_CWD: Callable[[Any], Any] | None = None
 
 
-def install_enqueue(fn: Callable[..., Awaitable[None]] | None) -> None:
-    global _ENQUEUE
-    _ENQUEUE = fn
+def install_enqueue(
+    fn: Callable[..., Awaitable[None]] | None,
+    resolve_cwd: Callable[[Any], Any] | None = None,
+) -> None:
+    """``resolve_cwd`` is the runtime's ``resolve_run_cwd``: plan-auto keeps
+    the Approve tap's moved-project check."""
+    global _ENQUEUE, _RESOLVE_CWD
+    _ENQUEUE, _RESOLVE_CWD = fn, resolve_cwd
 
 
 async def enqueue_approved(request_id: str, *, reply_to: int) -> bool:
@@ -641,12 +647,27 @@ async def enqueue_approved(request_id: str, *, reply_to: int) -> bool:
         plan = _PENDING.get(request_id)
     if _ENQUEUE is None or plan is None or plan.channel_id is None:
         return False
+    context = approve_context(plan)
+    if plan.cwd is not None:
+        # As the Approve tap: never carry a plan out somewhere else.
+        try:
+            cwd = _RESOLVE_CWD(context) if _RESOLVE_CWD is not None else None
+        except Exception:  # noqa: BLE001 — treated as "moved"
+            cwd = None
+        if cwd is None or str(cwd) != plan.cwd:
+            logger.warning(
+                "antigravity.plan.cwd_changed",
+                request_id=request_id,
+                session_id=plan.conversation_id,
+                path="auto",
+            )
+            return False
     await _ENQUEUE(
         plan.channel_id,
         reply_to,
         approve_prompt(plan.engine),
         ResumeToken(engine=plan.engine, value=plan.conversation_id),
-        approve_context(plan),
+        context,
         plan.thread_id,
     )
     return True

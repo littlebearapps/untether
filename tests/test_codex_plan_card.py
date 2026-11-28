@@ -375,3 +375,48 @@ def test_question_push_names_codex() -> None:
     from untether.runner_bridge import question_notify_text
 
     assert question_notify_text("codex") == "Question from Codex"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("resolved", "queued"), [("/proj", True), ("/moved", False)])
+async def test_plan_auto_enqueue_refuses_a_moved_project(
+    resolved: str, queued: bool
+) -> None:
+    # Codex review: plan-auto keeps the Approve tap's moved-project check.
+    from untether.context import RunContext
+
+    plan = plan_mod.register(
+        engine="codex",
+        conversation_id=THREAD,
+        name="p",
+        channel_id=123,
+        thread_id=None,
+        context=RunContext(project="demo"),
+        cwd="/proj",
+        originator=None,
+    )
+    plan_mod.resolve(plan.request_id, "approve")
+    calls: list[tuple[Any, ...]] = []
+
+    async def enqueue(*args: Any) -> None:
+        calls.append(args)
+
+    plan_mod.install_enqueue(enqueue, lambda _ctx: Path(resolved))
+    with capture_logs() as logs:
+        assert await plan_mod.enqueue_approved(plan.request_id, reply_to=1) is queued
+    assert bool(calls) is queued
+    moved = [e for e in logs if e["event"] == "antigravity.plan.cwd_changed"]
+    assert bool(moved) is not queued
+
+
+@pytest.mark.anyio
+async def test_failed_replacement_plan_still_retires_the_old_card(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    # Codex review: supersede() at spawn made the old card unanswerable, so a
+    # failed replacement run must retire it too.
+    first = _card_id(await _plan_run(tmp_path, "one"))
+    fake = _fake(tmp_path, "two", status="failed")
+    done = _completed(await _run(_runner(fake), resume=_RESUME, options=_PLAN))
+    assert not done.ok
+    assert [r["id"] for r in done.usage[RETIRED_CARDS_KEY]] == [first]

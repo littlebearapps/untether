@@ -1423,6 +1423,15 @@ class CodexAppServerRunner(CodexRunner):
             if state.thread_id
             else resume
         )
+        if state.superseded_cards:
+            # #965: a failed replacement plan still retires the older cards
+            # (supersede() already made them unanswerable).
+            from ..utils import antigravity_plan
+
+            retired = antigravity_plan.retire(state.superseded_cards)
+            state.superseded_cards = []
+            if retired:
+                usage = {**(usage or {}), RETIRED_CARDS_KEY: retired}
         # An answer that arrived before the failure is kept; the bridge
         # appends the error to it (#53760).
         return state.factory.completed_error(
