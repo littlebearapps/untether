@@ -194,7 +194,7 @@ async def inject_live_followup(
         # write. A failure closes the idle session as options_changed; the
         # resume path then applies the new options, cwd or daily gate.
         spawned_with = backend.spawn_options(session_id)
-        spawned_cwd = backend.spawn_cwd(session_id)
+        spawned_cwd = backend.spawn_cwd(session_id) if cwd_for is not None else None
 
         async def recheck() -> bool:
             try:

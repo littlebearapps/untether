@@ -594,7 +594,7 @@ class TestLiveFollowupGate:
             closes.append((sid, reason, only_if_idle))
             return True
 
-        async def _inject(sid, text, *, command_uuid=None):
+        async def _inject(sid, text, *, command_uuid=None, **_):
             injected.append(text)
             return True
 
@@ -636,7 +636,7 @@ class TestLiveFollowupGate:
                 plan_rearm_failed = False
                 spawn_run_options = EngineRunOptions()
 
-        async def _inject(sid, text, *, command_uuid=None):
+        async def _inject(sid, text, *, command_uuid=None, **_):
             injected.append(text)
             return True
 
