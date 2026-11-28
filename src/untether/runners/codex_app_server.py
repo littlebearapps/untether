@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -868,7 +869,10 @@ _PLAN_THREADS: set[str] = set()
 def _plan_name(text: str) -> str:
     """The card's title: the plan's first non-empty line, ≤60 chars."""
     line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    line = line.lstrip("#").strip() or "plan"
+    # Markdown off: a heading/bullet marker and backticks (a cut code span
+    # garbles the card, live CX-34).
+    line = re.sub(r"^(?:[#>*+-]+|\d+[.)])\s*", "", line).replace("`", "").strip()
+    line = line or "plan"
     return line if len(line) <= 60 else line[:59].rstrip() + "…"
 
 

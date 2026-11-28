@@ -2838,7 +2838,11 @@ def stream_holds_background(stream: Any) -> bool:
 
 
 # #1077: the push sent with a question card names the engine asking.
-_QUESTION_ENGINE_NAMES = {"claude": "Claude Code", "antigravity": "Antigravity"}
+_QUESTION_ENGINE_NAMES = {
+    "claude": "Claude Code",
+    "antigravity": "Antigravity",
+    "codex": "Codex",
+}
 
 
 def question_notify_text(engine: str) -> str:

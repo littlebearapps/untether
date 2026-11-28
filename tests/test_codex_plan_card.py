@@ -71,7 +71,7 @@ async def test_plan_turn_posts_card(
         done = await _plan_run(tmp_path)
     card = review_card(done.usage)
     assert card is not None
-    assert card["text"].startswith("📋 Codex's plan is ready — 1. Count only")
+    assert card["text"].startswith("📋 Codex's plan is ready — Count only")
     assert "Ask me" in card["text"]
     labels = [b["text"] for row in card["buttons"] for b in row]
     assert labels == ["✅ Approve Plan", "❌ Deny", "💬 Keep planning"]
@@ -352,3 +352,26 @@ def test_live_approve_is_an_options_change() -> None:
         )
 
     assert anyio.run(steer) == "options_changed"
+
+
+@pytest.mark.parametrize(
+    ("text", "name"),
+    [
+        (
+            "- Create executable `bye.sh` with `#!/bin/sh`",
+            "Create executable bye.sh with #!/bin/sh",
+        ),
+        ("## Count text files\n- step", "Count text files"),
+        ("1. First step", "First step"),
+        ("`", "plan"),
+    ],
+)
+def test_plan_name_drops_markdown(text: str, name: str) -> None:
+    # Live CX-34: a bullet with a cut code span garbled the card title.
+    assert gate._plan_name(text) == name
+
+
+def test_question_push_names_codex() -> None:
+    from untether.runner_bridge import question_notify_text
+
+    assert question_notify_text("codex") == "Question from Codex"
