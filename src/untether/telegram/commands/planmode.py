@@ -288,11 +288,13 @@ _CODEX_MODES = {"on": "plan", "plan-auto": "plan-auto"}
 _CODEX_MODE_TEXT = {
     "plan": (
         "Plan first",
-        "Codex plans without changing anything; reply to go ahead",
+        "Codex plans without changing anything; tap Approve on the plan card"
+        " to go ahead (Ask me), or reply to keep planning",
     ),
     "plan-auto": (
         "Plan first (auto)",
-        "Codex plans first and the plan is approved for you",
+        "Codex plans first, then the plan is approved for you and Codex"
+        " carries it out in Ask me, with no tap",
     ),
 }
 CODEX_NEEDS_APP_SERVER = (

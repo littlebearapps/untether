@@ -2274,6 +2274,30 @@ async def _retire_review_cards(
         logger.info("review_card.retired", card_id=card_id)
 
 
+async def _queue_auto_approved(
+    usage: Mapping[str, Any] | None, *, reply_to: MessageRef | None
+) -> None:
+    """#965 plan-auto: the card went out already approved; queue the
+    approved run in the chat, the same follow-up an Approve tap queues."""
+    card = review_card(dict(usage) if usage is not None else None)
+    if card is None or card.get("auto_approve") is not True or reply_to is None:
+        return
+    from .utils import antigravity_plan
+
+    card_id = str(card.get("id") or "")
+    try:
+        queued = await antigravity_plan.enqueue_approved(
+            card_id, reply_to=reply_to.message_id
+        )
+    except Exception:  # noqa: BLE001 — the final is out either way
+        logger.warning("codex.plan.auto_enqueue_failed", card_id=card_id, exc_info=True)
+        return
+    if queued:
+        logger.info("codex.plan.auto_enqueued", card_id=card_id)
+    else:
+        logger.warning("codex.plan.auto_enqueue_unavailable", card_id=card_id)
+
+
 def _insert_footer_line(msg: RenderedMessage, insertion: str) -> RenderedMessage:
     """Add a footer line (cost, budget alert, #702 outlier, usage) to a final.
 
@@ -9020,6 +9044,7 @@ async def handle_message(
                 status=status,
             )
         await _retire_review_cards(cfg.transport, completed.usage)
+        await _queue_auto_approved(completed.usage, reply_to=t_reply_to)
         if (
             capped_head is not None
             and final_ref is not None

@@ -3161,6 +3161,10 @@ async def run_main_loop(
                     cwd_for=_job_run_cwd,
                 ),
             )
+            # #965 plan-auto: the bridge queues an auto-approved plan's run.
+            from ..utils import antigravity_plan
+
+            antigravity_plan.install_enqueue(scheduler.enqueue_resume)
 
             # --- /at one-shot delayed runs (#288) ---
             from . import at_scheduler

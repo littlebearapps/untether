@@ -13,6 +13,10 @@ answer acts on the *conversation*, not on a waiting process:
   rewrites the plan and posts a new card.
 
 Callback data: ``agy_plan:<approve|deny|discuss>:<request id>``.
+
+Codex's plan card (#965, D4) uses the same callback: the plan's ``engine``
+picks the resume token, the approve prompt ("Implement the plan.") and the
+approved run's mode (Ask me); "Let's discuss" reads "Keep planning".
 """
 
 from __future__ import annotations
@@ -25,8 +29,6 @@ from ...utils import antigravity_plan
 from .ask_question import _ALREADY_ANSWERED_TOAST
 
 logger = get_logger(__name__)
-
-ENGINE = "antigravity"
 
 _EARLY_TOASTS = {
     "approve": "Approved",
@@ -55,6 +57,12 @@ def _parse(args_text: str) -> tuple[str, str] | None:
     if action not in antigravity_plan.ACTIONS or not request_id:
         return None
     return action, request_id
+
+
+def _early_toast(action: str, plan: antigravity_plan.PendingPlan | None) -> str:
+    if action == "discuss" and plan is not None:
+        return antigravity_plan.discuss_toast(plan.engine)  # #965
+    return _EARLY_TOASTS[action]
 
 
 def _refusal_toast(reason: str) -> str:
@@ -101,15 +109,15 @@ class AntigravityPlanCommand:
                 if plan is None:
                     return _EXPIRED_TOAST
                 if plan.status in ("pending", "discuss"):
-                    return _EARLY_TOASTS[action]
+                    return _early_toast(action, plan)
                 return _refusal_toast(
                     "superseded" if plan.status == "superseded" else "answered"
                 )
-            reason, _plan = antigravity_plan.claim(request_id, channel_id, claim_owner)
+            reason, plan = antigravity_plan.claim(request_id, channel_id, claim_owner)
         except Exception:  # noqa: BLE001 — a toast must never take out the tap
             logger.debug("antigravity.plan.early_toast_failed", exc_info=True)
             return _EARLY_TOASTS[action]
-        return _EARLY_TOASTS[action] if reason == "ok" else _refusal_toast(reason)
+        return _early_toast(action, plan) if reason == "ok" else _refusal_toast(reason)
 
     @staticmethod
     def release_early_claim(owner: str) -> None:
@@ -168,13 +176,13 @@ class AntigravityPlanCommand:
                         request_id=request_id,
                         session_id=plan.conversation_id,
                     )
-                    await self._edit_card(ctx, card_ref, plan.name, "deny")
+                    await self._edit_card(ctx, card_ref, plan, "deny")
                     return CommandResult(text=_MOVED_TEXT, notify=True)
             antigravity_plan.resolve(request_id, "approve")
-            await self._edit_card(ctx, card_ref, plan.name, "approve")
+            await self._edit_card(ctx, card_ref, plan, "approve")
             await enqueue(
-                antigravity_plan.APPROVE_PROMPT,
-                ResumeToken(engine=ENGINE, value=plan.conversation_id),
+                antigravity_plan.approve_prompt(plan.engine),
+                ResumeToken(engine=plan.engine, value=plan.conversation_id),
                 context=context,
                 reply_to_message_id=ctx.message.message_id,
                 thread_id=plan.thread_id,
@@ -185,16 +193,18 @@ class AntigravityPlanCommand:
                 path="resume",
                 request_id=request_id,
                 session_id=plan.conversation_id,
+                engine=plan.engine,
             )
             return None
 
         antigravity_plan.resolve(request_id, action)
-        await self._edit_card(ctx, card_ref, plan.name, action)
+        await self._edit_card(ctx, card_ref, plan, action)
         logger.info(
             "antigravity.plan.decision",
             decision=action,
             request_id=request_id,
             session_id=plan.conversation_id,
+            engine=plan.engine,
         )
         return None
 
@@ -215,15 +225,22 @@ class AntigravityPlanCommand:
         else:
             if reason == "superseded":
                 antigravity_plan.mark_retired(plan.request_id)
-            text = antigravity_plan.card_text(plan.name, plan.status)
+            text = antigravity_plan.card_text(
+                plan.name, plan.status, engine=plan.engine
+            )
         return await cls._edit_text(ctx, ref, text)
 
     @classmethod
     async def _edit_card(
-        cls, ctx: CommandContext, ref: MessageRef, name: str, decision: str
+        cls,
+        ctx: CommandContext,
+        ref: MessageRef,
+        plan: antigravity_plan.PendingPlan,
+        decision: str,
     ) -> None:
         """The card shows the decision and loses its buttons."""
-        await cls._edit_text(ctx, ref, antigravity_plan.card_text(name, decision))
+        text = antigravity_plan.card_text(plan.name, decision, engine=plan.engine)
+        await cls._edit_text(ctx, ref, text)
 
     @staticmethod
     async def _edit_text(ctx: CommandContext, ref: MessageRef, text: str) -> bool:

@@ -787,7 +787,8 @@ def _codex_app_server_pm_page(
         "• <b>Auto-review</b> — like Ask me, but Codex's reviewer decides"
         " instead of you (extra Codex usage)",
         "• <b>Plan first</b> — Codex plans without changing anything (asks"
-        " before anything more than reading); reply to go ahead",
+        " before anything more than reading); tap Approve on the plan card"
+        " to go ahead",
         "",
         "Cron and webhook runs never ask: actions that need approval fail.",
         "",
