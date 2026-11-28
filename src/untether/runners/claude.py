@@ -20,7 +20,7 @@ import subprocess as subprocess_module
 import time
 import tty
 import weakref
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC
 from pathlib import Path
@@ -1316,6 +1316,7 @@ async def inject_when_idle(
     command_uuid: str,
     poll_s: float = 0.2,
     cancel: Any = None,
+    recheck: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool:
     """Queue-semantics follow-up (#776 phase 06): wait until the live session
     is idle — its turn ended and no earlier injected line is still waiting to
@@ -1328,6 +1329,11 @@ async def inject_when_idle(
     ``cancel`` (#935, the scheduler's ``InjectCancel``): /cancel from the
     queued card stops the wait (False; the scheduler drops the job), and
     ``cancel.claim()`` under ``live.lock`` decides the race with the write.
+
+    ``recheck`` (#1433): the caller's options/cwd/daily-gate checks, run
+    again under the lock just before the write — the wait can span a whole
+    turn. A failure closes the idle session as ``options_changed`` so the
+    message resumes a process spawned with the new settings.
     """
     unaccounted_since: float | None = None
     while True:
@@ -1362,6 +1368,8 @@ async def inject_when_idle(
                         # #383: the CLI refused the plan re-arm — resume a
                         # fresh plan-mode process instead.
                         return False
+                    if recheck is not None and not await recheck():
+                        break  # #1433: closed below, outside the lock
                     if cancel is not None and not cancel.claim():
                         return False  # #935: cancelled from its queued card
                     await _write_plan_rearm_if_needed(
@@ -1380,6 +1388,10 @@ async def inject_when_idle(
                         live.state.unplanned_commands.pop(command_uuid, None)
                     return ok
         await anyio.sleep(poll_s)
+    await close_live_session(
+        session_id, "options_changed", notice=True, only_if_idle=True
+    )
+    return False
 
 
 # ``steered``: written while a turn was open (folded into it, or run as the

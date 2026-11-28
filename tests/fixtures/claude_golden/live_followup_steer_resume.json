@@ -462,7 +462,7 @@
   },
   {
    "logs": [
-    "info claude.live_session.options_changed closed=false session_id=\"golden-session-1\" +[logger_name]"
+    "debug claude.live_session.options_changed closed=false session_id=\"golden-session-1\" +[logger_name]"
    ],
    "result": false,
    "step": "do:followup text=switch model mid-turn"

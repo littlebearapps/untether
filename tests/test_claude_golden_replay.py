@@ -164,7 +164,7 @@ GOLDEN_SHA256: dict[str, str] = {
     "idle_agent_approval.jsonl": "06a22dd133572a3534b268d15cd75f444e2e37f3eaa45df3de8fc60f27a4efb8",
     "idle_close_no_tasks.json": "093fc408180dcd50262c58bf31de5705de727a184f8ea03a9a777caa0540dd3d",
     "idle_close_no_tasks.jsonl": "518075134a3dac8b7750956f3675d23e6610e2a41004812eae1e1ba759ffe6d6",
-    "live_followup_steer_resume.json": "93c154fb560d72ab050fc0c3c935045390fe4eb7a5271c0ecddf72eb915e1701",
+    "live_followup_steer_resume.json": "8b3564b479a46b6d6d0fdbe70a8a556b9acd5322da26c9453465ebf4c7b7b049",
     "live_followup_steer_resume.jsonl": "594d499aa474e70da35d111fc66d16cbcf9f845664e383364f8bcaa0ebf8094c",
     "originator_only.json": "343ae8a2cd895901d7841bcc5ac1a55aba10e78e6fe02c27d8136196afeec70f",
     "originator_only.jsonl": "a1673d2a6fcdaf1602868a79739928a2055a2870ca832089b65199df0b374cae",

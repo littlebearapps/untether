@@ -1593,7 +1593,9 @@ async def test_inject_live_followup_logs_use_engine_namespace(
         "source": "scheduler",
     }
     assert [(sid, text) for sid, text, _ in injected] == [("sid-inj", "again")] * 2
-    assert injected[-1][2] == {"command_uuid": command_uuid}
+    kwargs = dict(injected[-1][2])
+    assert callable(kwargs.pop("recheck"))  # #1433: re-checked before the write
+    assert kwargs == {"command_uuid": command_uuid}
     assert closes == []
 
 
@@ -1648,3 +1650,131 @@ async def test_1275_queued_continue_closes_the_idle_live_session_at_once(
             while ran != ["first", "hi"]:
                 await anyio.sleep(0.01)
     assert closes == [("sid-inj", "continue")]
+
+
+# --- #1433: checks re-run just before the write -------------------------------
+
+
+async def _wait_then_change(live: LiveSession, change: Any) -> dict[str, Any]:
+    """Queue a follow-up while a turn runs, ``change()`` the chat's settings,
+    then end the turn; returns the injector's result."""
+    result: dict[str, Any] = {}
+
+    async def go(inject: Any) -> None:
+        result["ok"] = await inject()
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(go, change.inject)
+            await anyio.sleep(0.1)
+            change()
+            live.state.turn_open = False
+    return result
+
+
+async def test_1433_options_changed_while_waiting_close_instead_of_writing(
+    cleanup,
+) -> None:
+    """/planmode on while a follow-up waits for the turn: it must not run in
+    the acceptEdits process, it resumes one spawned in plan mode."""
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=False)
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="acceptEdits")
+    closed: list[bool] = []
+
+    async def aclose() -> None:
+        closed.append(True)
+
+    pipe.aclose = aclose  # type: ignore[method-assign]
+    mode = ["acceptEdits"]
+
+    async def options_for(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode=mode[0])
+
+    def change() -> None:
+        mode[0] = "plan"
+
+    change.inject = lambda: inject_live_followup(  # type: ignore[attr-defined]
+        _job("sid-inj"), options_for=options_for
+    )
+    result = await _wait_then_change(live, change)
+    assert result["ok"] is False
+    assert pipe.sent == []
+    assert closed == [True]
+    assert live.state.live_close_reason == "options_changed"
+
+
+async def test_1433_cwd_changed_while_waiting_close_instead_of_writing(
+    cleanup, tmp_path
+) -> None:
+    """#996 at write time: /ctx set while the follow-up waits."""
+    live, pipe = _install("sid-inj", idle=False)
+    live.state.spawn_cwd = tmp_path
+    cwd = [tmp_path]
+
+    async def cwd_for(job: ThreadJob):
+        return cwd[0]
+
+    def change() -> None:
+        cwd[0] = tmp_path / "other"
+
+    change.inject = lambda: inject_live_followup(  # type: ignore[attr-defined]
+        _job("sid-inj"), cwd_for=cwd_for
+    )
+    result = await _wait_then_change(live, change)
+    assert result["ok"] is False
+    assert pipe.sent == []
+    assert live.state.live_close_reason == "options_changed"
+
+
+async def test_1433_unchanged_settings_still_write_after_the_wait(cleanup) -> None:
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=False)
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="plan")
+
+    async def options_for(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode="plan")
+
+    def change() -> None:
+        pass
+
+    change.inject = lambda: inject_live_followup(  # type: ignore[attr-defined]
+        _job("sid-inj"), options_for=options_for
+    )
+    result = await _wait_then_change(live, change)
+    assert result["ok"] is True
+    assert len(pipe.sent) == 1
+
+
+async def test_1433_options_change_during_the_cwd_recheck_is_seen(
+    cleanup, tmp_path
+) -> None:
+    """The cwd lookup is a worker-thread hop: a /planmode landing during it
+    must still be seen (options are read after the cwd, last before the
+    write) — Codex review."""
+    from untether.runners.run_options import EngineRunOptions
+
+    live, pipe = _install("sid-inj", idle=True)
+    live.state.spawn_run_options = EngineRunOptions(permission_mode="acceptEdits")
+    live.state.spawn_cwd = tmp_path
+    mode = ["acceptEdits"]
+    calls = [0]
+
+    async def options_for(job: ThreadJob) -> EngineRunOptions:
+        return EngineRunOptions(permission_mode=mode[0])
+
+    async def cwd_for(job: ThreadJob):
+        calls[0] += 1
+        if calls[0] == 2:  # the recheck's lookup, under the session lock
+            mode[0] = "plan"
+        return tmp_path
+
+    with anyio.fail_after(10):
+        ok = await inject_live_followup(
+            _job("sid-inj"), options_for=options_for, cwd_for=cwd_for
+        )
+    assert ok is False
+    assert pipe.sent == []
+    assert live.state.live_close_reason == "options_changed"

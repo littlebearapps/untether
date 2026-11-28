@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -2167,12 +2167,17 @@ class CodexAppServerRunner(CodexRunner):
         state.idle_since = None
         wait = state.pending_start
         reason, command_uuid = "unknown", None
+        started_ago_s: float | None = None
         state.turn_compact = False
         # A turn that starts while the follow-up is still unwritten is
         # Codex's own (review H2); the answer reconciles the rest.
         if wait is not None and wait.sent and wait.turn_id in (None, turn.id):
             wait.turn_id, wait.started = turn.id, True
             reason, command_uuid = "followup", wait.command_uuid
+            # #1425 (#815 parity): the reader can pause while the bridge
+            # delivers the previous final, so this event may be read long
+            # after the turn began: time it from the write.
+            started_ago_s = max(0.0, time.monotonic() - wait.at)
             state.turn_compact = wait.compact
             _settle_start(state, wait)
         state.turn_reason, state.turn_command_uuid = reason, command_uuid
@@ -2188,6 +2193,7 @@ class CodexAppServerRunner(CodexRunner):
                 turn=state.completed_turns + 1,
                 reason=reason,  # type: ignore[arg-type]
                 command_uuid=command_uuid,
+                started_ago_s=started_ago_s,
             )
         ]
 
@@ -2899,13 +2905,17 @@ async def inject_when_idle(
     command_uuid: str,
     poll_s: float = 0.2,
     cancel: Any = None,
+    recheck: Callable[[], Awaitable[bool]] | None = None,
 ) -> bool:
     """Queue semantics (D7): wait until the live session is idle, then write
     ``text`` as a follow-up ``turn/start``, or Codex's own
     ``thread/compact/start`` for a bare ``/compact``, under the session
     lock. False: the caller keeps the message for the resume path. A
     refusal closes the idle session first, so that resume isn't left behind
-    the idle grace (and nothing is retried into it)."""
+    the idle grace (and nothing is retried into it). ``recheck`` (the
+    caller's options/cwd/daily-gate checks) and the transport run again under
+    the lock, just before the write: the wait can span a whole turn (#1433,
+    #1431)."""
     close_reason = "error"
     while True:
         if cancel is not None and cancel.cancelled:
@@ -2921,6 +2931,11 @@ async def inject_when_idle(
                     if await _trust_drift(state) is not None:
                         close_reason = "trust_changed"
                         break
+                    if not APP_SERVER_ACTIVE or (
+                        recheck is not None and not await recheck()
+                    ):
+                        close_reason = "options_changed"
+                        break
                     if cancel is not None and not cancel.claim():
                         return False  # #935: cancelled from its queued card
                     outcome = await start_followup(
@@ -2935,7 +2950,12 @@ async def inject_when_idle(
                     if outcome != "busy":
                         break
         await anyio.sleep(poll_s)
-    await close_live_session(session_id, close_reason, only_if_idle=True)
+    await close_live_session(
+        session_id,
+        close_reason,
+        notice=close_reason == "options_changed",
+        only_if_idle=True,
+    )
     return False
 
 

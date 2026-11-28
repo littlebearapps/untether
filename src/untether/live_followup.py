@@ -112,7 +112,10 @@ async def inject_live_followup(
             closed = await backend.close(
                 session_id, "options_changed", notice=True, only_if_idle=True
             )
-            logger.info(
+            # Mid-turn the close is refused and the pump retries every tick
+            # (as context_changed below): only the close is worth INFO.
+            log = logger.info if closed else logger.debug
+            log(
                 f"{ns}.options_changed",
                 session_id=session_id,
                 closed=closed,
@@ -185,16 +188,27 @@ async def inject_live_followup(
         engine=backend.engine,
     )
     extra: dict[str, Any] = {} if cancel is None else {"cancel": cancel}
-    if options_for is not None and getattr(backend, "rechecks_before_write", False):
-        # Antigravity (#977 review H1): the wait can span a whole turn, so the
-        # options are compared again just before the write.
+    if getattr(backend, "rechecks_before_write", False):
+        # #977 review H1, #1433: the wait can span a whole turn, so the
+        # backend runs the checks above again under its lock, just before the
+        # write. A failure closes the idle session as options_changed; the
+        # resume path then applies the new options, cwd or daily gate.
         spawned_with = backend.spawn_options(session_id)
+        spawned_cwd = backend.spawn_cwd(session_id) if cwd_for is not None else None
 
         async def recheck() -> bool:
             try:
-                return await options_for(job) == spawned_with
+                # The cwd first (a worker-thread hop): the options read is the
+                # last await before the write, so a settings change can't land
+                # between it and the write (Codex review).
+                if cwd_for is not None and await cwd_for(job) != spawned_cwd:
+                    return False
+                now = await options_for(job) if options_for is not None else None
+                if options_for is not None and now != spawned_with:
+                    return False
             except Exception:  # noqa: BLE001 — unknown options: don't write
                 return False
+            return daily_gate(now) is None
 
         extra["recheck"] = recheck
     ok = False
