@@ -4,7 +4,7 @@ When an engine fails, Untether scans the error message and shows an actionable r
 
 This page lists all recognised error patterns grouped by category, in the order they are checked. Hints are matched by substring (case-insensitive) — first match wins, so the order is part of the behaviour.
 
-When no pattern matches, the card still ends with a next step: *Send your message again. If it keeps failing, /new starts a fresh session — or /export this chat and report it.* A card that says the saved session was just cleared skips this line, because that notice already says your next message starts a new session ([#1196](https://github.com/littlebearapps/untether/issues/1196)).
+When no pattern matches, the card still ends with a next step: *Send your message again. If it keeps failing, /new starts a fresh session — or /export this chat and report it.* A card that says the saved session was just cleared skips this line, because that notice already says your next message starts a new session, and so does a deliberate stop (Codex's 🛑 Stop on an approval card already says what to do next) ([#1196](https://github.com/littlebearapps/untether/issues/1196)).
 
 ## Message style guide
 
@@ -29,7 +29,7 @@ A bare "retry" isn't a next step: say who retries and how. `tests/test_error_nex
 
 **Australian English** (cancelled, recognise, behaviour).
 
-**Never leak secrets.** An engine error shown on a card has URL userinfo and query values masked, and credential-shaped tokens (`sk-…`, `Bearer …`, `api_key=…`) replaced with `[secret]` (`utils/error_display.redact_error_secrets`). Command replies quote an error only through `user_safe_error` (paths, URLs and secrets removed, length capped), and `agy` text only through `redact_agy_text`.
+**Never leak secrets.** An engine error shown on a card has URL userinfo and query values masked, and credential-shaped tokens (`sk-…`, `Bearer …`, `api_key=…`) replaced with `[secret]` (`utils/error_display.redact_error_secrets`). Command replies quote an error only through `user_safe_error` (paths, URLs and secrets removed, length capped) or, when the user must fix a path (a project or `@branch` error), `redact_error_secrets` (secrets masked, paths kept), and `agy` text only through `redact_agy_text`.
 
 ## Engine end-of-life and CLI flag drift
 

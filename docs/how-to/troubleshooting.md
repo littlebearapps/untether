@@ -171,7 +171,7 @@ does not hit the version gate — `/threads` can list threads normally while
 
 **Symptom:** the progress message sits at `starting · gemini` and never advances.
 Eventually the stall watchdog fires and you get
-`Auto-cancelled: session appears stuck (max_warnings)` — typically after about
+`⚠️ Auto-cancelled: this run stopped making progress…` — typically after about
 half an hour.
 
 Run standalone, `gemini` prints `IneligibleTierError: This client is no longer
