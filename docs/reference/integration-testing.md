@@ -91,8 +91,8 @@ These tests were previously considered "manual" but can be automated via MCP and
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **Support status** | Yes | Yes | Yes | Yes | Yes | Deprecated | Deprecated |
 | Interactive approval | Yes | Yes (app-server) | - | - | Yes (Ask me, agy plugin) | Flag only | - |
-| Plan mode | Yes | - | - | - | Yes (Plan first) | - | - |
-| Ask questions | Yes | - | - | - | Yes (agy plugin) | - | - |
+| Plan mode | Yes | Yes (app-server) | - | - | Yes (Plan first) | - | - |
+| Ask questions | Yes | Yes (app-server, plan mode) | - | - | Yes (agy plugin) | - | - |
 | Resume/continue | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Model override | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
 | Reasoning levels | Yes | Yes | - | - | Yes (per model) | - | - |
@@ -297,12 +297,19 @@ Restore the TOML afterwards. Every CX run also covers Tier 1 U1–U10 on Codex w
 | CX-28 | **Options change** (#964) | `/model set <other>` while a session is live, then a prompt | `codex.live_session.options_changed`; the old PID exits; the prompt resumes the same thread on a new PID with the new model |
 | CX-29 | **Death notice** (#964) | `kill -TERM` the idle session's `codex app-server` PID | `codex.live_session.died_unexpectedly`; "⚠️ The Codex session ended unexpectedly"; the next message resumes the thread |
 | CX-30 | **Restart drain + steer on exec** (#964) | B4 with a live Codex session; then `transport = "exec"` and `/steer x` while a run works | Clean drain (`shutdown.live_sessions_closed`); on exec "↪️ Steer isn't supported on codex — queued instead." (unchanged) |
+| CX-31 | **Plan turn** ([#965](https://github.com/littlebearapps/untether/issues/965)) | `/planmode on`; `Plan a script that prints today's date` | `codex.app_server.initialized experimental=True`; `codex.app_server.thread_settings mode=plan`; `preamble.skipped reason=codex_plan_mode`; the final is the plan text; footer `plan first`; then the card "📋 Codex's plan is ready — <title>" with ✅ Approve Plan / ❌ Deny / 💬 Keep planning (`codex.plan.card auto=False`) |
+| CX-32 | **Approve** (#965) | Tap ✅ on CX-31's card | `antigravity.plan.decision decision=approve engine=codex`; a new run on the same thread: `turn/start` input "Implement the plan.", `codex.app_server.plan_mode_reset`, `thread_settings mode=default`, footer `ask me`, effective sandbox `workspace-write` (trusted project); the final starts "📋 Plan (approved) — <title>"; the next plain message is a plan turn again |
+| CX-33 | **Deny / Keep planning / supersede** (#965) | A new plan, tap ❌; another plan, tap 💬 and reply `make it UTC` | ❌: `decision=deny`, nothing runs; 💬: `decision=discuss`, the card stays; the reply's plan posts a new card and the old one loses its buttons (`review_card.retired`, #1074) |
+| CX-34 | **plan-auto** (#965) | `/planmode plan-auto`; CX-31's prompt | Footer `plan first (auto)`; the card posts as "✅ Plan approved (auto)" with no buttons (`codex.plan.card auto=True`, `codex.plan.auto_approved`); the implement run starts with no tap (`codex.plan.auto_enqueued`) |
+| CX-35 | **Question buttons** (#965) | `/planmode on`; `Before planning, ask me with request_user_input whether to use Python or Bash, then plan hello world`; repeat and use Other + typed text | Option buttons plus "Other (type reply)" (`codex.app_server.question`); a tap answers `{answers: {<id>: {answers: [<label>]}}}` (`codex.app_server.question.answered`) and the plan uses it; the row closes `❓ answered`; the typed reply works the same; outside plan mode no question buttons appear |
+| CX-36 | **Unattended plan** (#965) | `run_once` cron with `permission_mode = "plan"` and CX-35's prompt | The plan is the final, no card; 🔒 footer whose hint names `permission_mode = "auto"`; a question is answered `{answers: {}}` with the #835 🔒 row; the run doesn't wait. Remove the cron |
+| CX-37 | **Leaving plan mode + exec** (#965) | After CX-31 (no approve): `/planmode off`, `create date.sh`; then `transport = "exec"` and `/planmode on` | `codex.app_server.plan_mode_reset`, effective sandbox `workspace-write`, `date.sh` created in the chat's tier; on exec `/planmode` replies "Plan mode needs the app-server transport", and a stored `plan` mode is refused before spawn (session kept). Restore the TOML |
 | CX-38 | **Session approval** | Ask before writes; `create a.txt, then append to a.txt`; tap 🔁 Allow for session on the first | Second write doesn't prompt (same run) |
 | CX-39 | **Sub-agent** | Ask before writes; `use a sub-agent to create child.txt` | Card says "(sub-agent)" and shows the diff; Approve → file exists |
-| CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 5 tiers, then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
+| CX-40 | **Tier page + exec refusal** | `/config` → Approval policy on app-server (5 tiers), set Ask me; switch to `transport = "exec"`; send a prompt | Page shows 6 tiers (Plan first included, #965), then 2; home reads "ask me (needs app-server)"; exec run refused before spawn naming the fix; saved session kept; restore |
 | CX-41 | **Untrusted project** | Record `sha256sum ~/.codex/config.toml`. Ask me, `Reply PONG`: (a) flat: a project with no `[projects]` entry; (b) nested ([#1408](https://github.com/littlebearapps/untether/issues/1408)): a git repo inside a listed folder, with no entry of its own; (c) shadowing: a subfolder whose own entry has no `trust_level`, inside a trusted repo; (d) control: a subfolder of the trusted `codex-test` | (a)–(c): log `codex.app_server.untrusted_read_only cwd=… repo_root=…`, `sandbox: read-only` sent, ⚠️ row; (d): `workspace-write`, no row; the sha is unchanged after all four and no new `[projects."…"]` key appears |
 
-CX-19…CX-21b run on both transports unless the row says otherwise. CX-22…CX-29 need app-server with `[watchdog] live_sessions` on (the default); re-run CX-6, CX-11 and CX-15 inside a follow-up turn when the live-session code changes.
+CX-19…CX-21b run on both transports unless the row says otherwise. CX-22…CX-29 need app-server with `[watchdog] live_sessions` on (the default); re-run CX-6, CX-11 and CX-15 inside a follow-up turn when the live-session code changes. With CX-31…CX-37, re-run the Claude plan rows (ExitPlanMode card, plan-auto) and AG-41…AG-46 (shared plan-card store), CX-11 / CX-15 inside a plan turn, and CX-22 with a mode switch.
 
 Untrusted project (P1): CX-1 in a project with no `[projects]` entry in `~/.codex/config.toml` and a writable
 `sandbox_mode` shows the ⚠️ read-only row, and `~/.codex/config.toml` is unchanged afterwards (`cmp` against a
@@ -576,8 +583,8 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Runner code (`runners/*.py`) | U1-U4 (all supported engines), U6, U7 |
 | Antigravity engine (`runners/antigravity.py`, `schemas/antigravity.py`, `utils/antigravity_quota.py`) | Tier 1 (Antigravity) + AG-* |
 | Antigravity argv / CLI version (`utils/antigravity_argv.py`, `PROBED_CLI_VERSION` in `runners/antigravity.py`) | `uv run pytest tests/test_antigravity_cli_schema_drift.py` against the installed agy, AG-1, AG-4, U5 (Antigravity) |
-| Antigravity gate plugin (`antigravity/*.py`, `cli/agy_gate.py`, `interactive/*.py`) | `untether agy-gate status --project <dir> --canary`, AG-27 to AG-34 (questions, steer), AG-47 to AG-59 (plugin checks, Ask me approvals) |
-| Antigravity Plan first (`utils/antigravity_plan.py`, `telegram/commands/antigravity_plan.py`) | AG-41 to AG-46 |
+| Antigravity gate plugin (`antigravity/*.py`, `cli/agy_gate.py`, `interactive/*.py`) | `untether agy-gate status --project <dir> --canary`, AG-27 to AG-34 (questions, steer), AG-47 to AG-59 (plugin checks, Ask me approvals), CX-35 (Codex questions) |
+| Antigravity Plan first (`utils/antigravity_plan.py`, `telegram/commands/antigravity_plan.py`) | AG-41 to AG-46, CX-31…CX-37 (Codex plan card) |
 | Base runner / liveness watchdog / stall monitor (`runner.py` `JsonlSubprocessRunner`, `_subprocess_watchdog`; `runner_bridge.py` expected-wait branches) | Tier 1 U1 + U6 on every supported engine |
 | Preamble (`runner_bridge.py` `_apply_preamble`) | U1 + U2 + U6 on Codex, OpenCode and Pi; C1, C2, C4 on Claude (`preamble.applied preamble_len=3338` unchanged for Claude) |
 | Per-run stream binding (`runner.py` `RunStreamHandle` / `publish_run_stream`, `runner_bridge.py` stall monitor) | RC12-1, S1, S2, U1-U4 (all supported engines), B-LIVE-1 |
@@ -585,7 +592,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Runner bridge / auto-continue / no-op resume recovery (`runner_bridge.py`, `runners/claude.py`) | B-RESUME, U1-U4 (Claude), U6, U7, R20-919a…d + R20-920a…e (approval reminders) |
 | Live sessions / follow-up injection / scheduler (`runners/claude.py`, `runner_bridge.py`, `live_followup.py`, `live_sessions.py`, `antigravity/live.py`, `telegram/steer.py`, `scheduler.py`) | B-LIVE-1…7, CX-22…CX-30 (Codex app-server), AG-62…AG-69 (Antigravity), RC12-4…7, C1-C6, S7, U1-U4 (Claude), R15-6, R20-921a/b (cancel vs queued follow-up), R20-923 + R20-928a…c (hook rewake, no-query results), R20-929a…f (idle approval surface) |
 | Claude hooks / `--include-hook-events` (`runners/claude.py` hook frames, SDK hook callbacks) | RC14-6, R17-828, R20-923, R20-925a/d/h (hook callbacks on every control-channel spawn) |
-| Loop scheduling (`loop_scheduler.py`, `telegram/loop.py`, `[loop]` settings, Claude CronCreate/CronDelete/ScheduleWakeup handling) | R20-925a…m, R20-926a…c, R17-01d, U6, Q16 |
+| Loop scheduling (`loop_scheduler.py`, `telegram/loop.py`, `[loop]` settings, Claude CronCreate/CronDelete/ScheduleWakeup handling) | R20-925a…m, R20-926a…c, R17-01d, U6, Q16; `telegram/loop.py` question echo and plan-auto queueing: CX-31…CX-37 |
 | Telegram transport (`telegram/*.py`) | T1-T10, S7, S8, R15-9-1 (benign edit/delete 400s at startup) |
 | Outbox delivery (`telegram/outbox_delivery.py`, `[transports.telegram.files] outbox_*`) | R20-924a…g, T3, U1 (Claude, Codex), U4, B-RESUME |
 | Control channel (`claude_control.py`, `orphan_approvals.py`) | C1-C6, T8, S9, R15-5, R15-6, R17-13a/b, R17-16, R20-929a…f |
@@ -603,7 +610,7 @@ Integration tests are run by Claude Code via Telegram MCP tools (see "Automated 
 | Shutdown (`shutdown.py`) | S3, B4 |
 | Error hints / reasoning levels (`error_hints.py`, `engine_overrides.py`, `commands/config.py`, `commands/executor.py`) | Tier 7 Q2, Tier 4 O2 (Codex), U7, R15-14a…e |
 | Codex app-server contract / gate (`schemas/codex_app_server.py`, the schema fixture) | `uv run pytest tests/test_codex_app_server_drift.py -v -rs` against the installed codex on lba-1 (a skip there is a fail), plus `tests/test_codex_app_server_schema.py` + `tests/test_codex_app_server_runner.py` |
-| Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, CX-22…CX-30 (live sessions, steer, `/compact`), and the drift row above |
+| Codex app-server transport (`runners/codex_app_server.py`, `runners/codex_rpc.py`, `schemas/codex_app_server.py`) | Tier 1 on Codex with both transports + CX-1…CX-10, CX-22…CX-30 (live sessions, steer, `/compact`), CX-31…CX-37 (plan mode, plan card, questions), and the drift row above |
 | Codex approvals and tiers (`runners/codex_approvals.py`, the tiers in `runners/codex_app_server.py`, Codex rows of `runners/run_options.py` and `commands/config.py`) | CX-11…CX-18, CX-38…CX-41, CX-21c, plus Tier 4 O2 on Codex |
 | Codex reads, quota footer, reasoning, web search (`runners/codex_reads.py`, `telegram/commands/usage.py`, the Codex rows of `engine_overrides.py` / `commands/config.py` / `runner_bridge.py` footer) | CX-19…CX-21b, Tier 1 U1 on Codex (both transports), Tier 4 O2 on Codex |
 | `extra_args` guard (`runners/extra_args_guard.py`, Claude/Codex `build_runner`, `runtime_loader.py`) | R15-1-1…4, U1 (Claude, Codex), C1, CX-10, CX-21c, drift tests (`tests/test_claude_cli_schema_drift.py`, `tests/test_codex_cli_schema_drift.py`) |

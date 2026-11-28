@@ -1,6 +1,6 @@
 # Interactive approval
 
-When Claude Code runs in permission mode, Untether shows inline buttons in Telegram so you can approve or deny tool calls from your phone. Antigravity CLI gets its own approval buttons in **Ask me** mode and a plan card in **Plan first**; see [Antigravity CLI — Permission mode](#antigravity-cli-permission-mode). Most of this page describes Claude Code.
+When Claude Code runs in permission mode, Untether shows inline buttons in Telegram so you can approve or deny tool calls from your phone. Antigravity CLI gets its own approval buttons in **Ask me** mode and a plan card in **Plan first**; see [Antigravity CLI — Permission mode](#antigravity-cli-permission-mode). Codex CLI on the app-server transport has approval cards, a plan card in **Plan first** and question buttons; see [Codex CLI — Approval policy](#codex-cli-approval-policy). Most of this page describes Claude Code.
 
 ## When buttons appear
 
@@ -102,6 +102,8 @@ Toggle ask mode on or off via `/config` → Ask mode. When off, questions are au
 
 **Antigravity** asks through its own `ask_question` tool, and you get the same card: option buttons, **Other (type reply)**, or a text reply. This needs [Untether's agy plugin](antigravity.md#telegram-questions-and-steer) on the host; without it agy skips the question and carries on with its own default. agy shows your answer to the model and the progress row becomes `❓ answered: …`. If nobody answers within 15 minutes, agy is told to use its best judgement and say what it assumed (`⏱️ No answer — agy carried on`). Cron and webhook runs never show the card.
 
+**Codex** asks only in [Plan first](#codex-plan-first), on the app-server transport ([#965](https://github.com/littlebearapps/untether/issues/965)). You get the same card: option buttons, **Other (type reply)**, or a text reply, for up to three questions. The toggle is `/config` → **Questions (plan mode only)**; when it's off, and in cron and webhook runs, Codex gets no answer and carries on with its best judgement. If Codex marks a question as secret, Untether never repeats your typed answer, shows it in the progress message or logs it; your own message stays in the chat, so delete it yourself if you need to.
+
 <img src="../assets/screenshots/ask-text-reply-howto.jpg" alt="AskUserQuestion with option buttons and &quot;Other (type reply)&quot;" width="360" loading="lazy" />
 
 <div markdown>
@@ -153,7 +155,7 @@ To change this behaviour, adjust the permission mode. See [Plan mode](plan-mode.
 
 ## Engine-specific approval policies
 
-Claude Code has the fullest set of mid-run approval buttons. Antigravity CLI has them in **Ask me** mode (with Untether's agy plugin on the host) and a plan card in **Plan first**. Codex CLI has them on the app-server transport in **Ask me** and **Ask before writes**. The other engines offer only pre-run policies that control what the agent is allowed to do before it starts:
+Claude Code has the fullest set of mid-run approval buttons. Antigravity CLI has them in **Ask me** mode (with Untether's agy plugin on the host) and a plan card in **Plan first**. Codex CLI has them on the app-server transport in **Ask me** and **Ask before writes**, and a plan card in **Plan first**. The other engines offer only pre-run policies that control what the agent is allowed to do before it starts:
 
 ### Codex CLI — Approval policy
 
@@ -166,6 +168,7 @@ Toggle via `/config` → **Approval policy**. Which policies you get depends on 
 | **Ask me** | app-server | `on-request` + `workspace-write` | Edits files in this project on its own; asks you here before network access, files outside the project, or commands its rules flag |
 | **Ask before writes** | app-server | `on-request` + `read-only` | Read-only; asks you before every file change and every command that needs more |
 | **Auto-review** | app-server | `on-request` + `workspace-write` + Codex's reviewer | Like Ask me, but Codex's own reviewer decides instead of you (extra Codex usage). Each review shows as a 🛡️ row; nothing waits for you |
+| **Plan first** | app-server | `on-request` + `read-only` + Codex's Plan mode | Codex plans without changing anything, then you approve the plan on a card. See [Codex: Plan first](#codex-plan-first) |
 
 Codex asks when an action needs more than its sandbox allows, not before every tool as Claude Code does. To see every
 write, pick **Ask before writes**. On the exec transport `codex exec` never asks, so Ask me, Ask before writes and
@@ -195,6 +198,36 @@ trusts a project for you.
 **Cron and webhook runs never ask:** every policy runs with Codex's `never` approval policy, so actions that need
 approval fail inside the sandbox and the model is told. If a request still arrives, it is declined and the final
 message says so.
+
+<a id="codex-plan-first"></a>
+
+#### Codex: Plan first
+
+App-server only ([#965](https://github.com/littlebearapps/untether/issues/965)). Send `/planmode on` (or pick **Plan
+first** in `/config` → **Approval policy**), then ask for a change as usual:
+
+1. Codex plans in its own Plan mode. It reads the project and changes nothing; anything more than reading raises an
+   approval card. The footer says `plan first`.
+2. The answer is the plan, followed by a card, "📋 Codex's plan is ready — <title>", with three buttons:
+    - **✅ Approve Plan**: Codex carries out the plan in **Ask me** mode, on the same thread. Its footer says
+      `ask me` and its answer starts `📋 Plan (approved)`.
+    - **❌ Deny**: nothing runs.
+    - **💬 Keep planning**: nothing runs. Reply with what to change, and Codex posts a revised plan with a new card.
+3. The chat stays in Plan first, so your next request is planned first too. `/planmode off` goes back to the chat's
+   usual policy (Full auto unless `untether.toml` sets another), and your next message takes the thread out of plan
+   mode.
+
+Good to know:
+
+- `/planmode plan-auto` approves the plan for you: the card arrives already approved (`plan first (auto)` in the
+  footer) and Codex starts carrying it out with no tap.
+- A newer plan replaces the older card, which loses its buttons. If Codex answers without a plan, there's no card.
+- Cron and webhook runs in Plan first post the plan and change nothing, with a 🔒 footer. Set
+  `permission_mode = "auto"` on a cron that should make the change.
+- If the thread is still in plan mode when it shouldn't be (after a restart, say), you get one
+  `⚠️ This Codex thread was still in Plan mode…` row; send your message again.
+- On the exec transport `/planmode` says plan mode needs the app-server transport. If you switch a chat that used
+  Plan first to `transport = "exec"`, send `/new`: exec can't take the thread out of plan mode.
 
 
 !!! warning "Safe blocks every sandboxed write"
