@@ -261,9 +261,13 @@ class AskQuestionCommand:
                             error=str(exc),
                         )
 
+                    # #965 D5: an earlier typed answer to a secret question
+                    # (Codex ``isSecret``) is never echoed.
+                    secret = {q["question"] for q in flow.questions if q.get("secret")}
                     answer_lines = []
                     for question, answer in flow.answers.items():
-                        answer_lines.append(f"Q: {question}\nA: {answer}")
+                        shown = "(hidden)" if question in secret else answer
+                        answer_lines.append(f"Q: {question}\nA: {shown}")
                     answers_summary = "\n\n".join(answer_lines)
                     return CommandResult(
                         text=f"Answers sent:\n\n{answers_summary}",

@@ -52,12 +52,18 @@ def codex_reasoning_levels(model: str | None) -> tuple[str, ...]:
 ASK_QUESTIONS_SUPPORTED_ENGINES = frozenset({"claude"})
 
 
-def ask_questions_supported(engine: str | None, cwd: object = None) -> bool:
+def ask_questions_supported(
+    engine: str | None, cwd: object = None, *, transport: str | None = None
+) -> bool:
     """Capability-driven (#980, D23): Claude always; Antigravity when
     Untether's agy plugin is installed (and, when *cwd*'s ``-p /hooks``
-    check already ran, it passed). Cheap: never runs agy."""
+    check already ran, it passed); Codex on the app-server transport only
+    (#965: Plan mode's ``requestUserInput``; exec never asks). Cheap: never
+    runs agy."""
     if engine in ASK_QUESTIONS_SUPPORTED_ENGINES:
         return True
+    if engine == "codex":
+        return transport == "app-server"
     if engine != "antigravity":
         return False
     from pathlib import Path
@@ -86,9 +92,7 @@ def diff_preview_supported(
     only changes Ask me's approval cards, and Ask me needs the same agy
     plugin as Ask mode. Codex on the app-server transport only (#963): exec
     never asks, so it has no card to show a diff on."""
-    if engine == "codex":
-        return transport == "app-server"
-    return ask_questions_supported(engine, cwd)
+    return ask_questions_supported(engine, cwd, transport=transport)
 
 
 # Engines with a subscription-usage footer. Each needs an entry in

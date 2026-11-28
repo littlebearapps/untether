@@ -2,7 +2,7 @@
 
 Runner docs describe the **engine-specific** behaviour: event shapes, JSON streaming, and integration notes.
 
-Interactive features (approval buttons, plan mode, AskUserQuestion, live sessions, steer) are fullest in **Claude Code**. **Antigravity CLI** has Plan first, and with Untether's agy plugin on the host also approval buttons (Ask me), question buttons and steer, but no live sessions. Codex, OpenCode and Pi run non-interactively. Antigravity CLI (`antigravity`) is a separate engine from the deprecated Gemini CLI (`gemini`).
+Interactive features (approval buttons, plan mode, AskUserQuestion, live sessions, steer) are fullest in **Claude Code**. **Antigravity CLI** has Plan first, and with Untether's agy plugin on the host also approval buttons (Ask me), question buttons and steer, but no live sessions. **Codex** on the app-server transport has approval buttons, Plan first with a plan card, question buttons in plan mode, live sessions and steer; on exec it runs non-interactively. OpenCode and Pi run non-interactively. Antigravity CLI (`antigravity`) is a separate engine from the deprecated Gemini CLI (`gemini`).
 
 - Claude Code: [Runner](claude/runner.md), [Stream JSON cheatsheet](claude/stream-json-cheatsheet.md), [Untether events](claude/untether-events.md)
 - Codex: [Exec JSON cheatsheet](codex/exec-json-cheatsheet.md), [Untether events](codex/untether-events.md)

@@ -1887,7 +1887,7 @@ async def test_server_requests_mid_turn_add_one_row_each_and_one_reply(
                 "method": "item/commandExecution/requestApproval",
                 "params": {"threadId": THREAD, "turnId": "turn-1", "itemId": "c"},
             },
-            {"id": 8, "method": "item/tool/requestUserInput", "params": {}},
+            {"id": 8, "method": "item/tool/call", "params": {}},
         ],
     )
     # #963: attended approvals become cards (test_codex_app_server_approvals);
@@ -1898,7 +1898,7 @@ async def test_server_requests_mid_turn_add_one_row_each_and_one_reply(
     assert titles == [
         "\N{LOCK} Unattended run — declined a command request: nobody to approve it",
         "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Codex sent a request Untether"
-        " doesn't support yet (`item/tool/requestUserInput`); declined",
+        " doesn't support yet (`item/tool/call`); declined",
     ]
     assert _completed(events).ok
     replies = [

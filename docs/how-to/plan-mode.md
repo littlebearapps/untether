@@ -189,7 +189,7 @@ Precedence: cron `permission_mode` > per-chat `/planmode` > engine config defaul
 
 ## Antigravity CLI: Plan first
 
-Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` are Claude-only. It needs no plugin on the host, and works differently from Claude's plan mode:
+Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/littlebearapps/untether/issues/981)). In an Antigravity chat `/planmode on` turns it on, `/planmode off` goes back to Workspace, `/planmode show` names the current mode and a bare `/planmode` toggles; `plan-auto` and `auto` aren't offered for Antigravity. It needs no plugin on the host, and works differently from Claude's plan mode:
 
 - Antigravity plans in one run and **stops**: the final shows the plan, followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Let's discuss**. Nothing in the project changes until you approve.
 - **Approve Plan** starts a second run in the same conversation, in Workspace mode (file edits, no shell). Its answer starts `📋 Plan (approved)`.
@@ -198,6 +198,27 @@ Antigravity has its own plan mode, **Plan first** ([#981](https://github.com/lit
 - Cron and webhook runs post the plan and change nothing; set `permission_mode = "workspace"` on a cron that should make the change.
 
 Details: [Interactive approval — Antigravity: Plan first](interactive-approval.md#antigravity-plan-first).
+
+## Codex CLI: Plan first
+
+Codex has plan mode on the app-server transport only (`transport = "app-server"` under `[engines.codex]`,
+[#965](https://github.com/littlebearapps/untether/issues/965)). In a Codex chat `/planmode on` (or `/config` →
+Approval policy → **Plan first**) turns it on, `/planmode plan-auto` approves plans for you, `/planmode off` goes back
+to the chat's usual policy, `/planmode show` names the current mode and a bare `/planmode` toggles. On exec,
+`/planmode` says plan mode needs the app-server transport.
+
+- Codex plans in its own Plan mode, read-only, asking before anything more than reading. The final is the plan,
+  followed by a card with **✅ Approve Plan**, **❌ Deny** and **💬 Keep planning**.
+- **Approve Plan** starts a run on the same thread in **Ask me** mode. Its answer starts `📋 Plan (approved)`.
+- **Deny** and **Keep planning** run nothing; reply to revise the plan and a new card replaces the old one.
+- **plan-auto** posts the card already approved and Codex starts on the plan with no tap.
+- Questions Codex asks while planning come as option buttons; see
+  [Answering questions](interactive-approval.md#answering-questions).
+- Cron and webhook runs post the plan and change nothing; set `permission_mode = "auto"` on a cron that should make
+  the change.
+- After switching a chat that used Plan first to the exec transport, send `/new`.
+
+Details: [Interactive approval — Codex: Plan first](interactive-approval.md#codex-plan-first).
 
 ## Related
 

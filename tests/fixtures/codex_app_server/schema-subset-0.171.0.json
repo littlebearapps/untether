@@ -522,6 +522,18 @@
    },
    "tier": "S"
   },
+  "server_request item/tool/requestUserInput": {
+   "names": {
+    "params.autoResolutionMs": "S",
+    "params.isBlocking": "S",
+    "params.itemId": "S",
+    "params.questions": "S",
+    "params.threadId": "S",
+    "params.turnId": "S",
+    "result.answers": "S"
+   },
+   "tier": "S"
+  },
   "server_request mcpServer/elicitation/request": {
    "names": {
     "params.environmentId": "S",
@@ -742,6 +754,24 @@
     "outputTokens": "S",
     "reasoningOutputTokens": "S",
     "totalTokens": "S"
+   },
+   "tier": "S"
+  },
+  "type ToolRequestUserInputOption": {
+   "names": {
+    "description": "S",
+    "label": "S"
+   },
+   "tier": "S"
+  },
+  "type ToolRequestUserInputQuestion": {
+   "names": {
+    "header": "S",
+    "id": "S",
+    "isOther": "S",
+    "isSecret": "S",
+    "options": "S",
+    "question": "S"
    },
    "tier": "S"
   },

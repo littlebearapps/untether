@@ -368,10 +368,12 @@ async def _page_home(ctx: CommandContext) -> None:
 
     show_plan_mode = current_engine in PERMISSION_MODE_SUPPORTED_ENGINES
     show_reasoning = supports_reasoning(current_engine)
-    show_ask_questions = ask_questions_supported(current_engine)
+    codex_transport = _codex_transport(ctx) if current_engine == "codex" else None
+    show_ask_questions = ask_questions_supported(
+        current_engine, transport=codex_transport
+    )
     show_diff_preview = diff_preview_supported(
-        current_engine,
-        transport=_codex_transport(ctx) if current_engine == "codex" else None,
+        current_engine, transport=codex_transport
     )
     # #423: Codex's per-chat Web search; hidden when a cached read says the
     # provider can't search (the home page never reads).
@@ -442,6 +444,12 @@ async def _page_home(ctx: CommandContext) -> None:
             codex_hint = _CODEX_HOME_HINTS.get(pm_label)
             pm_hint = f"  · {codex_hint}" if codex_hint else _home_hint("pm", pm_label)
             lines.append(f"Approval policy: <b>{pm_label}</b>{pm_hint}")
+            if show_ask_questions:
+                # #965: Codex asks only in Plan mode (app-server).
+                lines.append(
+                    f"{_CODEX_ASK_LABEL}: <b>{aq_display}</b>"
+                    f"{_home_hint('aq', aq_label)}"
+                )
             if show_diff_preview:
                 lines.append(f"Diff preview: <b>{dp_display}</b>")  # #963
             if show_web_search:
@@ -593,9 +601,15 @@ async def _page_home(ctx: CommandContext) -> None:
         if show_cost_usage:
             row1.append({"text": "💰 Cost & usage", "callback_data": "config:cu"})
         buttons.append(row1)
+        app_row = []
+        if show_ask_questions:
+            # #965: Plan mode question buttons.
+            app_row.append({"text": "❓ Questions", "callback_data": "config:aq"})
         if show_diff_preview:
             # #963: app-server approval cards.
-            buttons.append([{"text": "📝 Diff preview", "callback_data": "config:dp"}])
+            app_row.append({"text": "📝 Diff preview", "callback_data": "config:dp"})
+        if app_row:
+            buttons.append(app_row)
         buttons.append(
             [
                 {"text": "🔍 Verbose", "callback_data": "config:vb"},
@@ -734,6 +748,9 @@ _CODEX_PM_LABELS: dict[str, str] = {
 }
 
 
+# #965: Codex's Ask mode toggle (app-server): it only asks in Plan mode.
+_CODEX_ASK_LABEL = "Questions (plan mode only)"
+
 # #421: Codex tier labels share "ask me" with Antigravity, whose hint is wrong here.
 _CODEX_HOME_HINTS: dict[str, str] = {
     "ask me": "asks before network or outside files",
@@ -787,7 +804,8 @@ def _codex_app_server_pm_page(
         "• <b>Auto-review</b> — like Ask me, but Codex's reviewer decides"
         " instead of you (extra Codex usage)",
         "• <b>Plan first</b> — Codex plans without changing anything (asks"
-        " before anything more than reading); reply to go ahead",
+        " before anything more than reading); tap Approve on the plan card"
+        " to go ahead",
         "",
         "Cron and webhook runs never ask: actions that need approval fail.",
         "",
@@ -2122,12 +2140,17 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     prefs = shared_prefs_store(config_path)
     chat_id = ctx.message.channel_id
 
-    # Claude Code, or Antigravity with Untether's agy plugin (#980)
+    # Claude Code, Antigravity with Untether's agy plugin (#980), Codex on the
+    # app-server transport (#965)
     current_engine, _ = await _resolve_effective_engine(ctx)
-    if not ask_questions_supported(current_engine):
+    codex = current_engine == "codex"
+    if not ask_questions_supported(
+        current_engine, transport=_codex_transport(ctx) if codex else None
+    ):
         await _respond(
             ctx,
-            "<b>❓ Ask mode</b>\n\nAvailable for Claude Code, and for"
+            "<b>❓ Ask mode</b>\n\nAvailable for Claude Code, for Codex"
+            ' with <code>transport = "app-server"</code> (Plan mode), and for'
             " Antigravity once Untether's agy plugin is installed on the host"
             " (<code>untether agy-gate install</code>).",
             [[{"text": "← Back", "callback_data": "config:home"}]],
@@ -2182,10 +2205,15 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
         current_label = "on"
 
     lines = [
-        "<b>❓ Ask mode</b>",
+        f"<b>❓ {_CODEX_ASK_LABEL if codex else 'Ask mode'}</b>",
         "",
         "Let the agent ask you questions mid-task instead of guessing.",
         "Answers appear as tappable buttons.",
+        *(
+            ["Codex asks only in Plan mode (<code>/planmode on</code>)."]
+            if codex
+            else []
+        ),
         "",
         "• <b>on</b> — questions shown with option buttons (default)",
         "• <b>off</b> — agent makes its best guess and continues",

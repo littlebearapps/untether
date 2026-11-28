@@ -6,7 +6,7 @@ This document describes how Codex exec --json events are translated to Untether'
 
 ## Invocation
 
-Untether runs Codex non-interactively; it never stops to ask for approval, and approvals, plan mode, AskUserQuestion, live sessions and steer are Claude Code features (Antigravity CLI has its own, without live sessions). The argv (prompt on stdin) is:
+On exec, Untether runs Codex non-interactively: it never stops to ask for approval, and has no plan mode, questions, live sessions or steer. The app-server transport has all of them (see [runner.md](runner.md)). The argv (prompt on stdin) is:
 
 ```text
 codex [extra_args] [--profile <p>] [--model=<m>] [-c model_reasoning_effort=<level>] \
@@ -472,7 +472,7 @@ reads JSON-RPC notifications instead of `exec --json` lines (checked on codex-cl
 the exec item it corresponds to and rendered by the exec translation, so the rows, titles and `ok` values are the
 same on both transports. Transport choice, permissions and the native-vs-custom register: [runner.md](runner.md).
 
-Handshake: `initialize` (`experimentalApi: false`, deltas opted out) → `config/read` (Full auto only, for the trust
+Handshake: `initialize` (`experimentalApi: false`, or `true` for plan mode, #965; deltas opted out) → `config/read` (Full auto only, for the trust
 check) → `thread/start`, `thread/resume` or `thread/list` (`/continue`) → `turn/start {threadId, input, effort?,
 turnTrigger: "untether"}`. Stdin closes after `turn/completed` and Codex exits by itself.
 
@@ -496,7 +496,9 @@ turnTrigger: "untether"}`. Stdin closes after `turn/completed` and Codex exits b
 | `item/autoApprovalReview/started` / `completed` | a 🛡️ `note` row: `🛡️ Auto-review: <action>…`, then allowed / denied (`ok: false`, `level: warning`, with the rationale) / timed out / stopped; `codex.app_server.auto_review` logged. Payload read as a dict (`[UNSTABLE]`) |
 | `guardianWarning` | a ⚠️ row like `warning` |
 | approval request in a cron or webhook run | declined by the peer; one 🔒 row per run, `permission.unattended_deny` per request, `usage.unattended {trigger, mode, denied}` for the footer |
-| any other server request (user input, MCP elicitation, …) | declined by the peer, plus one ⚠️ row per request |
+| `item/tool/requestUserInput` ([#965](https://github.com/littlebearapps/untether/issues/965), Plan mode only) | attended with Ask mode on: a question card on the shared ask keyboard (`codex.app_server.question`), answered as `{answers: {<id>: {answers: [..]}}}`; its `serverRequest/resolved` closes the row `❓ answered` (`(hidden)` for `isSecret`) or withdraws it. Cron/webhook runs and Ask mode off: the peer answers `{answers: {}}` (🔒 row / ❓ note) |
+| `plan` item, `turn/plan/updated`, `thread/settings/updated` (#965) | the completed `plan` text is a plan turn's final (and its plan card); a `📋 Plan` checklist row; `collaborationMode.mode` only (`codex.app_server.thread_settings`). See [runner.md](runner.md#plan-mode-and-questions-965) |
+| any other server request (MCP elicitation, …) | declined by the peer, plus one ⚠️ row per request |
 | `account/rateLimits/updated` | merged into the quota cache (`runners/codex_reads.merge_push`; sparse, null never clears): the final's quota footer and a cap-hit's `usage.codex_resets_at` ("It resets in …" on the `usageLimitExceeded` hint) ([#966](https://github.com/littlebearapps/untether/issues/966)) |
 | `model/rerouted` (this thread) | a supplementary `started` with `meta.model = toModel`, so the footer names the model that ran; logs `codex.app_server.model_rerouted` ([#846](https://github.com/littlebearapps/untether/issues/846)) |
 

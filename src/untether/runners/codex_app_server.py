@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,13 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 
 from .. import __version__
 from ..events import EventFactory
+from ..interactive.questions import (
+    _ASK_QUESTION_FLOWS,
+    _PENDING_ASK_REQUESTS,
+    AskQuestionState,
+    format_question_message,
+    get_question_option_buttons,
+)
 from ..interactive.registry import drop_session, register, withdraw
 from ..logging import get_logger
 from ..markdown import format_duration
@@ -43,7 +51,13 @@ from ..model import (
     StartedEvent,
     UntetherEvent,
 )
-from ..runner import PRESPAWN_BLOCKED_KEY, JsonlStreamState, JsonlSubprocessRunner
+from ..runner import (
+    PRESPAWN_BLOCKED_KEY,
+    RETIRED_CARDS_KEY,
+    REVIEW_CARD_KEY,
+    JsonlStreamState,
+    JsonlSubprocessRunner,
+)
 from ..schemas import codex as codex_schema
 from ..schemas import codex_app_server as cas
 from ..schemas.codex_app_server import (
@@ -55,7 +69,7 @@ from ..schemas.codex_app_server import (
 from ..utils.antigravity_argv import COMPACT_COMMAND, native_compact_prompt
 from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
-from ..utils.paths import get_run_base_dir, relativize_path
+from ..utils.paths import get_run_base_dir, get_run_channel_id, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import kill_process, terminate_process
 from . import codex_approvals as approvals
@@ -83,7 +97,7 @@ from .codex_rpc import (
     Response,
     ServerRequest,
 )
-from .run_options import CODEX_PLAN_MODES, get_run_options
+from .run_options import CODEX_PLAN_MODES, get_run_options, permission_mode_source
 
 logger = get_logger(__name__)
 
@@ -684,6 +698,8 @@ class AppServerRunState(CodexRunState):
     cards: approvals.CodexApprovals | None = None
     file_changes: dict[str, list[Any]] = field(default_factory=dict)
     diff_preview: bool | None = None
+    # #965: the chat's Ask mode (None = on); off answers questions empty.
+    ask_questions: bool | None = None
     unattended: str | None = None
     unattended_denied: list[str] = field(default_factory=list)
     # A card's Stop (``cancel``) interrupted the turn on purpose.
@@ -756,6 +772,14 @@ class AppServerRunState(CodexRunState):
     plan_text: str | None = None
     # The chat's effort at spawn (a live follow-up has no run options).
     effort: str | None = None
+    # 965-2 plan card: ``plan-auto`` approves by itself; ``approved_plan`` =
+    # the approved plan's name (this run is its "Implement the plan.");
+    # ``superseded_cards`` = older cards to retire; ``plan_hint`` = the 🔒
+    # remedy for an unattended plan run.
+    plan_auto: bool = False
+    approved_plan: str | None = None
+    superseded_cards: list[str] = field(default_factory=list)
+    plan_hint: str | None = None
 
     # Duck-typed by the stall watchdogs (``runner._approval_pending``, the
     # bridge's ``_has_pending_approval``): Codex is waiting on the user.
@@ -840,6 +864,16 @@ def _settle_start(state: AppServerRunState, wait: _StartWait) -> None:
 # sends ``collaborationMode default`` once. In memory: a lost marker is
 # caught by the resume echo (``_PLAN_STUCK_NOTE``).
 _PLAN_THREADS: set[str] = set()
+
+
+def _plan_name(text: str) -> str:
+    """The card's title: the plan's first non-empty line, ≤60 chars."""
+    line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    # Markdown off: a heading/bullet marker and backticks (a cut code span
+    # garbles the card, live CX-34).
+    line = re.sub(r"^(?:[#>*+-]+|\d+[.)])\s*", "", line).replace("`", "").strip()
+    line = line or "plan"
+    return line if len(line) <= 60 else line[:59].rstrip() + "…"
 
 
 def _needs_mode_reset(state: AppServerRunState) -> bool:
@@ -937,6 +971,7 @@ class CodexAppServerRunner(CodexRunner):
             _warn_webhook_unknown_mode(webhook, raw_mode)
         state.unattended = run_options.unattended_trigger if run_options else None
         state.diff_preview = run_options.diff_preview if run_options else None
+        state.ask_questions = run_options.ask_questions if run_options else None
         mode = self._permission_mode()
         state.tier = _tier(mode, unattended=bool(state.unattended))
         # #965: experimental only for plan mode, or once to reset a thread
@@ -950,6 +985,7 @@ class CodexAppServerRunner(CodexRunner):
         )
         state.experimental = state.plan or state.reset
         state.effort = (run_options.reasoning if run_options else None) or None
+        self._plan_card_bookkeeping(state, mode, prompt, resume, run_options)
         state.sandbox = state.tier.sandbox
         state.check_trust = state.sandbox != "read-only"
         state.cwd = str(get_run_base_dir() or Path.cwd())
@@ -1347,6 +1383,8 @@ class CodexAppServerRunner(CodexRunner):
             events = self._on_notification(
                 msg, state=state, resume=resume, found_session=found_session
             )
+        elif isinstance(msg, ServerRequest) and msg.method == approvals.USER_INPUT:
+            events = self._question_card(msg, state)
         elif isinstance(msg, ServerRequest):
             events = self._approval_card(msg, state)
         return self._flush_rows(state, events)
@@ -1385,6 +1423,15 @@ class CodexAppServerRunner(CodexRunner):
             if state.thread_id
             else resume
         )
+        if state.superseded_cards:
+            # #965: a failed replacement plan still retires the older cards
+            # (supersede() already made them unanswerable).
+            from ..utils import antigravity_plan
+
+            retired = antigravity_plan.retire(state.superseded_cards)
+            state.superseded_cards = []
+            if retired:
+                usage = {**(usage or {}), RETIRED_CARDS_KEY: retired}
         # An answer that arrived before the failure is kept; the bridge
         # appends the error to it (#53760).
         return state.factory.completed_error(
@@ -1425,19 +1472,38 @@ class CodexAppServerRunner(CodexRunner):
                 "mode": self._permission_mode(),
                 "denied": denied,
             }
+            if state.plan_hint:
+                out["unattended"]["hint"] = state.plan_hint  # #965 plan mode
         out.update(usage or {})
         return self._untrusted_usage(state, out or None)
 
     def _on_server_request(self, state: AppServerRunState, method: str) -> Any:
         """The peer's observer: an approval in an attended run is deferred to
         a card (#963); anything else the peer declines, and this adds the
-        row (🔒 once per run when unattended, #835)."""
-        if method in approvals.APPROVAL_METHODS:
-            if state.cards is not None:
+        row (🔒 once per run when unattended, #835). A question (#965) is
+        deferred to the ask keyboard unless Ask mode is off; the peer then
+        answers ``{"answers": {}}`` and a quiet note says so."""
+        if method in approvals.APPROVAL_METHODS or method == approvals.USER_INPUT:
+            if state.cards is not None and (
+                method != approvals.USER_INPUT or state.ask_questions is not False
+            ):
                 return DEFER
             if state.unattended is not None:
                 self._unattended_decline(state, method)
                 return None
+        if method == approvals.USER_INPUT and state.ask_questions is False:
+            logger.info("codex.app_server.question.ask_off")
+            state.pending_rows.append(
+                state.factory.action_completed(
+                    action_id="codex.question_off",
+                    kind="note",
+                    title="❓ Codex asked a question; Ask mode is off, so it"
+                    " carries on with its best judgement",
+                    ok=True,
+                    level="info",
+                )
+            )
+            return None
         state.server_requests += 1
         title = (
             _APPROVAL_DECLINED_NOTE
@@ -1550,6 +1616,71 @@ class CodexAppServerRunner(CodexRunner):
             )
         ]
 
+    def _question_card(
+        self, msg: ServerRequest, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#965: a deferred ``requestUserInput`` → the shared ask keyboard
+        (Antigravity's gate questions are the model), registered for a tap
+        or a typed reply."""
+        cards = state.cards
+        params = cas.decode_request(msg.method, msg.params)
+        questions, ids = (
+            approvals.question_flow(params) if params is not None else ([], {})
+        )
+        if cards is None or not questions:
+            logger.warning("codex.app_server.question_unreadable")
+            state.outbox.append(("reply", msg.id, {"answers": {}}))  # type: ignore[arg-type]
+            return []
+        request_id = approvals.new_request_id()
+        action_id = f"codex.question.{request_id}"
+        channel = get_run_channel_id() or 0
+        register(
+            request_id,
+            session_key=cards.session_key,
+            responder=approvals.RESPONDER,
+            tool_name="request_user_input",
+            tool_input={"questions": questions},
+            kind="ask",
+        )
+        flow = AskQuestionState(
+            request_id=request_id, channel_id=channel, questions=questions
+        )
+        _ASK_QUESTION_FLOWS[request_id] = flow
+        _PENDING_ASK_REQUESTS[request_id] = (channel, questions[0]["question"])
+        secret = any(q["secret"] for q in questions)
+        cards.pending[request_id] = approvals.Pending(
+            rpc_id=msg.id,
+            method=msg.method,
+            action_id=action_id,
+            label="question",
+            decisions={},
+            turn_id=state.turn_id,
+            ids=ids,
+            secret=secret,
+        )
+        cards.by_rpc[msg.id] = request_id
+        logger.info(
+            "codex.app_server.question",
+            request_id=request_id,
+            questions=len(questions),
+            options=[len(q["options"]) for q in questions],
+            secret=secret,
+        )
+        return [
+            state.factory.action_started(
+                action_id=action_id,
+                kind="warning",
+                title=format_question_message(flow),
+                detail={
+                    "request_id": request_id,
+                    "tool_name": "ask_question",
+                    "ask_question": questions[0]["question"],
+                    "ask_flow": True,
+                    "inline_keyboard": {"buttons": get_question_option_buttons(flow)},
+                },
+            )
+        ]
+
     def _on_request_resolved(
         self, params: cas.ServerRequestResolvedParams, state: AppServerRunState
     ) -> list[UntetherEvent]:
@@ -1565,6 +1696,30 @@ class CodexAppServerRunner(CodexRunner):
     def _close_card(
         self, state: AppServerRunState, request_id: str, pending: approvals.Pending
     ) -> UntetherEvent:
+        if pending.method == approvals.USER_INPUT:
+            if pending.answer is None:
+                withdraw(request_id)
+                logger.info(
+                    "codex.app_server.question.withdrawn", request_id=request_id
+                )
+                title, ok = approvals.QUESTION_WITHDRAWN, False
+            else:
+                # D5: never the answer itself on a secret question's row.
+                title, ok = (
+                    (
+                        approvals.QUESTION_ANSWERED_SECRET
+                        if pending.secret
+                        else approvals.QUESTION_ANSWERED
+                    ),
+                    True,
+                )
+            return state.factory.action_completed(
+                action_id=pending.action_id,
+                kind="warning",
+                title=title,
+                ok=ok,
+                detail={"request_id": request_id},
+            )
         if pending.answer is None:
             withdraw(request_id)
             logger.info("codex.app_server.approval.withdrawn", request_id=request_id)
@@ -1820,6 +1975,115 @@ class CodexAppServerRunner(CodexRunner):
         if selected is None and messages:
             selected = messages[-1].text
         return selected or ""
+
+    # --- 965-2 plan card (reuses ``utils/antigravity_plan``, D4) ---------------
+
+    @staticmethod
+    def _plan_card_bookkeeping(
+        state: AppServerRunState,
+        mode: str | None,
+        prompt: str,
+        resume: ResumeToken | None,
+        run_options: Any,
+    ) -> None:
+        """At spawn: a plan run retires the thread's older cards (their plan
+        is being rewritten, #1074); the run an Approve queued takes the
+        approval (its ``📋 Plan (approved)`` header)."""
+        from ..utils import antigravity_plan
+
+        state.plan_auto = mode == "plan-auto"
+        if state.plan and state.unattended is not None:
+            state.plan_hint = antigravity_plan.unattended_hint(
+                state.unattended, permission_mode_source(run_options), engine=ENGINE
+            )
+        if resume is None or resume.is_continue:
+            return
+        if state.plan:
+            state.superseded_cards = antigravity_plan.supersede(resume.value)
+        elif prompt.rstrip().endswith(antigravity_plan.CODEX_APPROVE_PROMPT):
+            # endswith: a preamble may come first.
+            plan = antigravity_plan.take_approved(resume.value)
+            state.approved_plan = plan.name if plan is not None else None
+
+    def _plan_outcome(
+        self, state: AppServerRunState, answer: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        """A finished turn's plan card (#965-2): attended plan turns with a
+        ``plan`` item get Approve / Deny / Keep planning (``plan-auto``: the
+        card already approved, ``auto_approve`` for the bridge to queue the
+        run); unattended ones a 🔒 footer instead (#835). No plan item: no
+        card and no note (Codex may just answer)."""
+        from ..utils import antigravity_plan
+        from ..utils.paths import (
+            get_run_channel_id,
+            get_run_context,
+            get_run_sender_id,
+            get_run_thread_id,
+        )
+
+        usage: dict[str, Any] = {}
+        if state.approved_plan is not None:
+            header = antigravity_plan.approved_header(state.approved_plan)
+            answer = f"{header}\n\n{answer}" if answer else header
+            state.approved_plan = None
+        if state.plan and state.plan_text and state.thread_id:
+            if state.unattended is not None:
+                label = antigravity_plan.UNATTENDED_DENIED_LABEL
+                state.unattended_denied.append(label)  # the 🔒 footer's count
+                logger.warning(
+                    "permission.unattended_deny",
+                    tool_name=label,
+                    trigger_source=state.unattended,
+                    session_id=state.thread_id,
+                    permission_mode=self._permission_mode(),
+                    reason="plan_mode",
+                )
+            else:
+                base = get_run_base_dir()
+                name = _plan_name(state.plan_text)
+                pending = antigravity_plan.register(
+                    engine=ENGINE,
+                    conversation_id=state.thread_id,
+                    name=name,
+                    channel_id=get_run_channel_id(),
+                    thread_id=get_run_thread_id(),
+                    context=get_run_context(),
+                    cwd=str(base) if base is not None else None,
+                    originator=get_run_sender_id(),
+                )
+                state.superseded_cards.extend(pending.extra.get("superseded", ()))
+                card: dict[str, Any] = {
+                    "id": pending.request_id,
+                    "text": antigravity_plan.card_text(name, engine=ENGINE),
+                    "buttons": antigravity_plan.keyboard(
+                        pending.request_id, engine=ENGINE
+                    ),
+                }
+                if state.plan_auto:
+                    antigravity_plan.resolve(pending.request_id, "approve")
+                    card["text"] = antigravity_plan.card_text(
+                        name, "approve_auto", engine=ENGINE
+                    )
+                    card["buttons"] = []
+                    card["auto_approve"] = True
+                    logger.info(
+                        "codex.plan.auto_approved",
+                        thread_id=state.thread_id,
+                        request_id=pending.request_id,
+                    )
+                logger.info(
+                    "codex.plan.card",
+                    thread_id=state.thread_id,
+                    request_id=pending.request_id,
+                    auto=state.plan_auto,
+                )
+                usage[REVIEW_CARD_KEY] = card
+        if state.superseded_cards:
+            retired = antigravity_plan.retire(state.superseded_cards)
+            state.superseded_cards = []
+            if retired:
+                usage[RETIRED_CARDS_KEY] = retired
+        return answer, usage or None
 
     def _on_response(
         self, msg: Response, *, state: AppServerRunState, resume: ResumeToken | None
@@ -2558,10 +2822,13 @@ class CodexAppServerRunner(CodexRunner):
                         "manual_success": True,
                     }
                 }
+            answer, plan_usage = self._plan_outcome(state, self._answer(state))
+            if plan_usage:
+                usage = {**(usage or {}), **plan_usage}
             return [
                 *cards,
                 state.factory.completed_ok(
-                    answer=self._answer(state),
+                    answer=answer,
                     resume=found_session or resume,
                     usage=self._run_usage(state, usage),
                 ),
@@ -2598,6 +2865,9 @@ class CodexAppServerRunner(CodexRunner):
                 # #964-3b: an injected /compact; the bridge answers
                 # "🗜️ Context compacted" for it, as for a /compact run.
                 usage = {"compaction": {"trigger": "manual", "manual_success": True}}
+            answer, plan_usage = self._plan_outcome(state, answer)
+            if plan_usage:
+                usage = {**(usage or {}), **plan_usage}
             return [
                 self._turn_completed_event(state, ok=True, answer=answer, usage=usage)
             ]

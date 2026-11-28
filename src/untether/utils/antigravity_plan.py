@@ -23,6 +23,10 @@ the native-vs-custom register in ``docs/reference/runners/antigravity/``):
   plan cards (one per plan turn), bound to the chat it was posted in. It
   could move onto the engine-neutral approval registry (#960) later.
 
+Codex's plan card on the app-server transport (#965, D4) reuses the store,
+the card and the ``agy_plan`` callback with ``engine="codex"`` (its own
+words in ``_ENGINE_TEXT``); Antigravity's output is unchanged.
+
 Everything here is pure or touches only this module's state; the runner,
 the bridge and the ``agy_plan`` callback backend call into it.
 """
@@ -34,6 +38,7 @@ import os
 import secrets
 import threading
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -233,30 +238,40 @@ def approved_header(name: str) -> str:
 UNATTENDED_DENIED_LABEL = "plan approval"
 
 
-def unattended_hint(trigger: str, source: str | None = None) -> str:
+# The unattended hint's words per engine: config section, mode, mode label.
+_HINT_WORDS = {
+    "antigravity": ("[antigravity]", "workspace", "Workspace"),
+    "codex": ("[engines.codex]", "auto", "Full auto"),  # #965
+}
+
+
+def unattended_hint(
+    trigger: str, source: str | None = None, *, engine: str = "antigravity"
+) -> str:
     """The 🔒 footer's remedy for an unattended Plan first run. *source* is
     where the mode came from (#1159, ``permission_mode_source``)."""
+    section, mode, label = _HINT_WORDS.get(engine, _HINT_WORDS["antigravity"])
     if trigger.startswith("webhook:"):
-        fix = "pick Workspace in /config for webhook runs that should make changes"
+        fix = f"pick {label} in /config for webhook runs that should make changes"
         if source == "chat":
             return f"this webhook uses this chat's permission mode \N{EM DASH} {fix}"
         if source == "engine_config":
             return (
-                "this webhook uses [antigravity] permission_mode in untether.toml "
-                '(this chat has none set) \N{EM DASH} set it to "workspace" '
+                f"this webhook uses {section} permission_mode in untether.toml "
+                f'(this chat has none set) \N{EM DASH} set it to "{mode}" '
                 f"there, or {fix}"
             )
         if source == "trigger":
             return (
                 "this webhook sets its own permission_mode \N{EM DASH} set it to "
-                '"workspace" on the webhook to let it make changes'
+                f'"{mode}" on the webhook to let it make changes'
             )
         return (
-            "webhooks use the chat's /planmode, else [antigravity] "
+            f"webhooks use the chat's /planmode, else {section} "
             f"permission_mode in untether.toml \N{EM DASH} {fix}"
         )
     return (
-        'set permission_mode = "workspace" on the cron to let it make the '
+        f'set permission_mode = "{mode}" on the cron to let it make the '
         "change, or approve plans from the chat"
     )
 
@@ -278,7 +293,9 @@ def callback_data(action: str, request_id: str) -> str:
     return f"{CALLBACK_PREFIX}:{action}:{request_id}"
 
 
-def keyboard(request_id: str) -> list[list[dict[str, str]]]:
+def keyboard(
+    request_id: str, *, engine: str = "antigravity"
+) -> list[list[dict[str, str]]]:
     return [
         [
             {
@@ -289,7 +306,7 @@ def keyboard(request_id: str) -> list[list[dict[str, str]]]:
         ],
         [
             {
-                "text": DISCUSS_LABEL,
+                "text": _text(engine).discuss_label,
                 "callback_data": callback_data("discuss", request_id),
             }
         ],
@@ -311,11 +328,78 @@ _STATUS_TEXT = {
 }
 
 
-def card_text(name: str, decision: str | None = None) -> str:
-    head = f"📋 Antigravity's plan is ready — {name}"
+# #965 (D4): Codex's plan card reuses this store and callback.
+CODEX_APPROVE_PROMPT = "Implement the plan."
+CODEX_CARD_CAPTION = (
+    "Approving lets Codex carry out this plan in Ask me mode: it edits files "
+    "in this project and asks before anything more. Deny changes nothing. "
+    "Keep planning: reply with what to change and it revises the plan."
+)
+_CODEX_STATUS_TEXT = {
+    "approve": "✅ Plan approved — Codex is carrying it out (Ask me).",
+    # plan-auto: posted already approved, the implement run queued.
+    "approve_auto": "✅ Plan approved (auto) — Codex is carrying it out (Ask me).",
+    "deny": _STATUS_TEXT["deny"],
+    "discuss": (
+        "💬 Keep planning — reply with what to change and Codex will revise the plan."
+    ),
+    "superseded": _STATUS_TEXT["superseded"],
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _EngineText:
+    head: str
+    caption: str
+    status: dict[str, str]
+    discuss_label: str
+    discuss_toast: str
+    approve_prompt: str
+    approve_mode: str  # the approved run's permission mode
+
+
+_ENGINE_TEXT = {
+    "antigravity": _EngineText(
+        "📋 Antigravity's plan is ready",
+        CARD_CAPTION,
+        _STATUS_TEXT,
+        DISCUSS_LABEL,
+        "Let's discuss…",
+        APPROVE_PROMPT,
+        "workspace",
+    ),
+    "codex": _EngineText(
+        "📋 Codex's plan is ready",
+        CODEX_CARD_CAPTION,
+        _CODEX_STATUS_TEXT,
+        "💬 Keep planning",
+        "Keep planning…",
+        CODEX_APPROVE_PROMPT,
+        "ask",  # D2: Ask me
+    ),
+}
+
+
+def _text(engine: str) -> _EngineText:
+    return _ENGINE_TEXT.get(engine, _ENGINE_TEXT["antigravity"])
+
+
+def approve_prompt(engine: str) -> str:
+    return _text(engine).approve_prompt
+
+
+def discuss_toast(engine: str) -> str:
+    return _text(engine).discuss_toast
+
+
+def card_text(
+    name: str, decision: str | None = None, *, engine: str = "antigravity"
+) -> str:
+    text = _text(engine)
+    head = f"{text.head} — {name}"
     if decision is None:
-        return f"{head}\n\n{CARD_CAPTION}"
-    return f"{head}\n\n{_STATUS_TEXT.get(decision, decision)}"
+        return f"{head}\n\n{text.caption}"
+    return f"{head}\n\n{text.status.get(decision, decision)}"
 
 
 # ── pending plan cards ──────────────────────────────────────────────────────
@@ -335,6 +419,7 @@ class PendingPlan:
     status: str = "pending"  # pending | claimed | approve | deny | discuss | superseded
     claim_owner: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    engine: str = "antigravity"  # #965: "codex" too
 
 
 _LOCK = threading.Lock()
@@ -365,6 +450,7 @@ def register(
     context: RunContext | None,
     cwd: str | None,
     originator: int | None,
+    engine: str = "antigravity",
 ) -> PendingPlan:
     """A new plan card; earlier pending cards of the conversation are
     superseded (only the newest plan can be approved)."""
@@ -385,6 +471,7 @@ def register(
             originator=originator,
             name=name,
             created_at=now,
+            engine=engine,
         )
         if superseded:
             plan.extra["superseded"] = superseded
@@ -424,7 +511,12 @@ def retire(request_ids: list[str]) -> list[dict[str, str]]:
             if plan.extra.get("retired"):
                 continue
             plan.extra["retired"] = True
-            out.append({"id": rid, "text": card_text(plan.name, "superseded")})
+            out.append(
+                {
+                    "id": rid,
+                    "text": card_text(plan.name, "superseded", engine=plan.engine),
+                }
+            )
     return out
 
 
@@ -514,8 +606,8 @@ def take_approved(conversation_id: str) -> PendingPlan | None:
 
 def approve_context(plan: PendingPlan) -> RunContext:
     """The resumed run's context: the plan run's own project/branch, with
-    the run's permission mode set to Workspace (applied for that run only,
-    like a cron's own ``permission_mode``)."""
+    the run's permission mode set to Workspace (Codex: Ask me, D2), applied
+    for that run only, like a cron's own ``permission_mode``."""
     from ..context import RunContext
 
     base = plan.context if plan.context is not None else RunContext()
@@ -523,11 +615,62 @@ def approve_context(plan: PendingPlan) -> RunContext:
     # is a person's decision.
     return replace(
         base,
-        permission_mode="workspace",
+        permission_mode=_text(plan.engine).approve_mode,
         trigger_source=None,
         run_id=None,  # #1120
         strict_webhook=False,  # #1118
     )
+
+
+# #965 plan-auto: the scheduler's ``enqueue_resume`` (installed by the
+# Telegram loop), so the bridge can queue the approved run with no tap.
+_ENQUEUE: Callable[..., Awaitable[None]] | None = None
+_RESOLVE_CWD: Callable[[Any], Any] | None = None
+
+
+def install_enqueue(
+    fn: Callable[..., Awaitable[None]] | None,
+    resolve_cwd: Callable[[Any], Any] | None = None,
+) -> None:
+    """``resolve_cwd`` is the runtime's ``resolve_run_cwd``: plan-auto keeps
+    the Approve tap's moved-project check."""
+    global _ENQUEUE, _RESOLVE_CWD
+    _ENQUEUE, _RESOLVE_CWD = fn, resolve_cwd
+
+
+async def enqueue_approved(request_id: str, *, reply_to: int) -> bool:
+    """Queue an auto-approved plan's run in its chat, the same follow-up an
+    Approve tap queues. False when there is no plan or no scheduler."""
+    from ..model import ResumeToken
+
+    with _LOCK:
+        plan = _PENDING.get(request_id)
+    if _ENQUEUE is None or plan is None or plan.channel_id is None:
+        return False
+    context = approve_context(plan)
+    if plan.cwd is not None:
+        # As the Approve tap: never carry a plan out somewhere else.
+        try:
+            cwd = _RESOLVE_CWD(context) if _RESOLVE_CWD is not None else None
+        except Exception:  # noqa: BLE001 — treated as "moved"
+            cwd = None
+        if cwd is None or str(cwd) != plan.cwd:
+            logger.warning(
+                "antigravity.plan.cwd_changed",
+                request_id=request_id,
+                session_id=plan.conversation_id,
+                path="auto",
+            )
+            return False
+    await _ENQUEUE(
+        plan.channel_id,
+        reply_to,
+        approve_prompt(plan.engine),
+        ResumeToken(engine=plan.engine, value=plan.conversation_id),
+        context,
+        plan.thread_id,
+    )
+    return True
 
 
 def _reset_for_tests() -> None:

@@ -134,7 +134,9 @@ PRESPAWN_BUTTONS_KEY = "prespawn_buttons"
 # #981: ``CompletedEvent.usage`` key for a decision card an engine wants
 # posted right after the final (Antigravity's Plan first card):
 # ``{"text": str, "buttons": [[{"text", "callback_data"}, …], …]}``. The bridge
-# sends it as the final's last message, after the footers.
+# sends it as the final's last message, after the footers. #965: Codex's
+# plan-auto card is already approved: ``"auto_approve": True``, no buttons,
+# and the bridge queues the approved run (``antigravity_plan.enqueue_approved``).
 REVIEW_CARD_KEY = "review_card"
 
 
@@ -149,8 +151,10 @@ def review_card(usage: dict[str, Any] | None) -> dict[str, Any] | None:
     buttons = card.get("buttons")
     if not isinstance(text, str) or not text or not isinstance(buttons, list):
         return None
-    if not buttons or not all(isinstance(row, list) and row for row in buttons):
+    if not all(isinstance(row, list) and row for row in buttons):
         return None
+    if not buttons and card.get("auto_approve") is not True:
+        return None  # only a card already decided (#965 plan-auto) has none
     return card
 
 

@@ -189,6 +189,9 @@ _STRUCT_KEYS: list[tuple[type, str, str]] = [
         (cls, f"server_request {method}", "params.")
         for method, cls in cas.REQUEST_PARAM_TYPES.items()
     ),
+    # #965 question cards.
+    (cas.UserInputQuestion, "type ToolRequestUserInputQuestion", ""),
+    (cas.UserInputOption, "type ToolRequestUserInputOption", ""),
 ]
 
 

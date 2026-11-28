@@ -6,8 +6,9 @@ Untether runs Codex over one of two transports, chosen per install by `transport
 - **`exec`** (the default): one `codex exec --json` per message. See [untether-events.md](untether-events.md) and
   [exec-json-cheatsheet.md](exec-json-cheatsheet.md).
 - **`app-server`** (opt-in): one private `codex app-server --listen stdio://` per message, spoken to over JSON-RPC
-  (stable-tier methods only, `experimentalApi: false`). It counts as native despite the CLI's Experimental label
-  (Nathan, 2026-11-18, DEC-1); `experimentalApi` fields are reserved for plan mode (#965). See
+  (stable-tier methods, `experimentalApi: false`). It counts as native despite the CLI's Experimental label
+  (Nathan, 2026-11-18, DEC-1); `experimentalApi` is used only by plan-mode runs and the one run that takes a thread
+  out of plan mode ([below](#plan-mode-and-questions-965)). See
   [Transports](#transports) below and the app-server section of [untether-events.md](untether-events.md#app-server-transport-962).
 
 The engine id stays `codex` on both, resume lines (`codex resume <thread uuid>`) work across them, and a chat can
@@ -33,6 +34,7 @@ switch transport without losing its session.
 | `/cancel` | SIGTERM | `turn/interrupt`, SIGTERM after 3 s; an idle live session is closed (stdin) |
 | `% ctx` / 🗜️ row | none | `thread/tokenUsage/updated` / `contextCompaction` item (#832) |
 | `/steer`, `/compact` | queued ("Steer isn't supported on codex") / sent as text | native `turn/steer` / `thread/compact/start` (#964) |
+| Plan mode, questions ([#965](https://github.com/littlebearapps/untether/issues/965)) | `/planmode` says "Plan mode needs the app-server transport"; a stored `plan` / `plan-auto` is refused before spawn | Codex's own Plan mode, a plan card and question buttons; see [Plan mode and questions](#plan-mode-and-questions-965) |
 | Before spawning | nothing | the #961 support gate (below) |
 
 Every `thread/start` and `thread/resume` sends the tier's `approvalPolicy` and `approvalsReviewer` (`never` + `user`
@@ -41,8 +43,8 @@ history, and full-history hydration draws a deprecation warning on 0.170.0). A r
 model, so a resume with no `/model` override sends Codex's own configured model from `config/read` (`config.model`)
 instead ([#1369](https://github.com/littlebearapps/untether/issues/1369)): `/model clear` then takes effect on the
 next message rather than only after `/new`. Untether then compares the echo: a mismatch logs `codex.permission_mode.mismatch` and
-adds a ⚠️ row. Approval requests become cards (below); any other server request (user input, MCP elicitation, …) is
-declined with one ⚠️ row.
+adds a ⚠️ row. Approval requests become cards (below) and Plan mode questions become buttons (#965); any other server
+request (MCP elicitation, …) is declined with one ⚠️ row.
 `/continue` lists the project's most recent thread (`thread/list`, source kinds `cli`, `vscode`, `exec`, `appServer`)
 and resumes it, or starts a new one with a note.
 
@@ -146,6 +148,7 @@ App-server only. Checked against codex-cli 0.171.0 (schema, source, and the toke
 | Ask me (`ask`) | `on-request` | `workspace-write` if Codex lists the project, else `read-only` + ⚠️ row | `user` |
 | Ask before writes (`ask-writes`) | `on-request` | `read-only` | `user` |
 | Auto-review (`review`) | `on-request` | as Ask me | `auto_review` |
+| Plan first (`plan`, `plan-auto`, #965) | `on-request` | `read-only` | `user` |
 | any tier, cron or webhook run | `never` | per tier | `user` |
 
 - **Requests.** `item/commandExecution/requestApproval`, `item/fileChange/requestApproval` and
@@ -224,14 +227,75 @@ App-server only; exec is unchanged. Kill switches: `[watchdog] live_sessions = f
   open approval as an expected wait (`subprocess.approval_pending source=watchdog`, no `liveness_stall`); a `sleep`
   item shows `⏳ sleeping …` and its deadline counts as an expected wait too.
 
+## Plan mode and questions ([#965](https://github.com/littlebearapps/untether/issues/965))
+
+App-server only. Checked against codex-cli 0.171.0 (schema, the P7 frames in
+`tests/fixtures/codex_app_server/p7-plan-frames-0.171.0.jsonl` and `p7-question-frames-0.171.0.jsonl`, and dev-bot
+runs, 2026-11-28). Exec has no mode control: `/planmode` there answers "Plan mode needs the app-server transport", and
+a stored `plan` / `plan-auto` is refused before spawn (`codex_mode_needs_app_server`, session kept).
+
+- **Modes.** `/planmode on` (or `/config` → Approval policy → **Plan first**) stores `plan`, `/planmode plan-auto`
+  stores `plan-auto`, `/planmode off` clears the override (back to the TOML default), `show` names the mode and a bare
+  `/planmode` toggles. Both run the Ask before writes triple, footer `plan first` / `plan first (auto)`, so a step that
+  needs more than reading still raises an approval card.
+- **Connection.** `build_args` decides before spawn. A plan run, or the one run that resets a plan-touched thread,
+  sends `initialize.capabilities.experimentalApi: true` (`codex.app_server.initialized experimental=True`) and also
+  opts out of `turn/moderationMetadata` and `thread/readState/changed`. Every other run stays stable (DEC-1, DEC-3
+  revised = D1).
+- **Plan turn.** Every `turn/start` carries `collaborationMode {mode: "plan", settings: {model, reasoning_effort,
+  developer_instructions: null}}` (`null` = Codex's own Plan template). `thread/settings/updated` and the resume echo
+  are read for `collaborationMode.mode` only (`codex.app_server.thread_settings mode=plan`); they carry the whole
+  template, so neither is logged. The preamble is skipped (`preamble.skipped reason=codex_plan_mode`). The completed
+  `plan` item's text is the final when the turn has no final-answer message. `turn/plan/updated` gives one `📋 Plan`
+  checklist row per turn (`✓ ▸ ·`) when the model sends it; P7 saw none on `gpt-6.1-sol`.
+- **Plan card.** After an attended plan turn with a `plan` item, "📋 Codex's plan is ready — <first plan line>" posts
+  after the final (`codex.plan.card auto=False`) with ✅ Approve Plan / ❌ Deny / 💬 Keep planning. It uses
+  Antigravity's card store and `agy_plan:` callback (`utils/antigravity_plan.py`, `engine="codex"`; taps log
+  `antigravity.plan.decision decision=approve|deny|discuss engine=codex`). Approve checks the project hasn't moved,
+  then queues "Implement the plan." on the same thread in **Ask me** (D2); that run's final starts "📋 Plan (approved)
+  — <title>". Deny runs nothing; Keep planning leaves the card, and the reply plans again. A newer plan on the thread
+  retires the older card (`review_card.retired`, #1074). No `plan` item (Codex just answered): no card, no note.
+- **plan-auto.** The card posts already approved ("✅ Plan approved (auto)", no buttons; `codex.plan.card auto=True`,
+  `codex.plan.auto_approved`) and the bridge queues the same run with no tap (`codex.plan.auto_enqueued`).
+- **Leaving plan mode (D1).** Codex saves the mode on the thread (P7), so a plain `turn/start` after a plan turn plans
+  again. `_PLAN_THREADS` (in memory) marks a thread once it has planned. The next non-plan run on it (the Approve run,
+  or any message after `/planmode off`) opens an experimental connection once, sends `collaborationMode {mode:
+  "default"}` (`codex.app_server.plan_mode_reset`, then `thread_settings mode=default`) and unmarks it. A
+  `thread/resume` with no `sandbox` keeps the thread's saved one (the plan turn's `read-only`). So where Full auto would
+  omit it, the reset run names Codex's own default: `config/read`'s `sandbox_mode`, else `workspace-write` for a
+  trusted project, else `read-only`. A live session on a stable connection can't switch the mode, so a marked thread
+  closes it (`options_changed`) and the message resumes on a fresh process.
+- **Lost marker.** After a restart, `/continue` or a thread planned in the Codex TUI, a stable resume whose echo says
+  `mode: plan` runs that one turn as a plan turn (the chat's tier still applies, and the Plan template doesn't change
+  files). It adds one ⚠️ row, "This Codex thread was still in Plan mode, so this turn planned instead of acting; send
+  your message again" (`codex.app_server.plan_mode_stuck`), and marks the thread so the next run resets it.
+- **Exec.** Exec can't send a collaboration mode, so after switching a plan-touched chat to `transport = "exec"`, send
+  `/new`.
+- **Questions.** Codex asks only in Plan mode (`item/tool/requestUserInput`; `default_mode_request_user_input` is off).
+  In an attended run with Ask mode on (`/config` → **Questions (plan mode only)**) the request goes to the shared ask
+  keyboard: up to 3 questions, up to 4 option buttons each plus "Other (type reply)", titled `<header>: <question>`
+  (`codex.app_server.question`). A tap or typed reply goes back as `{answers: {<id>: {answers: [..]}}}`
+  (`codex.app_server.question.answered`, lengths only) and the row closes `❓ answered`. `serverRequest/resolved`
+  before an answer gives "❓ question withdrawn — Codex stopped waiting".
+- **Secret questions.** For a question marked `isSecret`, the typed reply is never echoed ("Answer sent to Codex."),
+  logged or shown on a row (`❓ answered (hidden)`), and leaves Untether's stores once sent. The user's own message
+  stays in the chat.
+- **No one to ask.** Cron and webhook runs answer `{answers: {}}` with the #835 🔒 row; Ask mode off answers the same
+  with a quiet ❓ note. Codex then carries on with its best judgement.
+- **Unattended plan runs.** A cron or webhook run in `plan` posts the plan as its final with no card and a 🔒 footer
+  (`permission.unattended_deny reason=plan_mode`) whose hint names `permission_mode = "auto"`.
+- **Not built.** A fresh-thread "clear context and implement" (`thread/prepareApprovedPlan`, DEC-17),
+  `collaborationMode/list`, and questions outside Plan mode.
+
 ## Native-vs-custom register
 
 What the Codex runner builds itself, and why (native-first rule, step 4). Checked against codex-cli 0.170.0; the #963
-/ #421 rows and the usage, catalogue and web-search rows against 0.171.0.
+/ #421 rows, the #965 rows and the usage, catalogue and web-search rows against 0.171.0.
 
 | Piece | Kind | Checked | Why custom / notes |
 |---|---|---|---|
-| App-server transport | native by exception | 0.170.0, 2026-11-18 (DEC-1) | The CLI still labels `codex app-server` Experimental (fails the "not marked experimental" test); Nathan accepted it. Stable-tier methods only, `experimentalApi: false`; experimental fields only for plan mode (#965) |
+| App-server transport | native by exception | 0.170.0, 2026-11-18 (DEC-1) | The CLI still labels `codex app-server` Experimental (fails the "not marked experimental" test); Nathan accepted it. Stable-tier methods, `experimentalApi: false`, except plan mode (#965, next row) |
+| Experimental connection for plan mode ([#965](https://github.com/littlebearapps/untether/issues/965)) | native by exception | 0.171.0, 2026-11-28 (DEC-1, DEC-3 revised = D1) | Only `turn/start.collaborationMode` selects Codex's Plan mode, and it is experimental (fails "not marked experimental"; the TUI's presets are client-side). Opt-in is per connection, so only `plan` / `plan-auto` runs and the one run that resets a plan-touched thread send `experimentalApi: true`; the drift test pins `collaborationMode` at tier E |
 | One app-server process per chat session ([#964](https://github.com/littlebearapps/untether/issues/964) 964-3b, was per run under DEC-4) | native long-lived session, custom lifecycle | 0.171.0, 2026-11-27 | Codex keeps a thread loaded for as long as the process runs and takes any number of `turn/start`s, so an attended run stays live after its first `turn/completed`. When to close it is Untether's (Codex has no idle policy): see the idle-close row. Stdio exit on stdin close is about 0.1 s |
 | Follow-up queue ([#964](https://github.com/littlebearapps/untether/issues/964), D7) | custom (Untether-side) | 0.171.0, 2026-11-26 | Codex's own `thread/queue/*` is experimental, so a follow-up waits in Untether's scheduler and goes in with `turn/start` once the session is idle (`inject_when_idle`, the same seam as Claude); a message while a turn runs is steered (Follow-up = steer) or waits |
 | Idle close, caps and kill switches ([#964](https://github.com/littlebearapps/untether/issues/964), D1, D5, D11) | custom (policy, shared with Claude) | 0.171.0, 2026-11-27 | No native idle timeout. Closes after `[watchdog] post_result_limbo_grace` (60 s, `idle_no_tasks`), at `live_session_max_s` (4 h; a running turn may finish, up to 30 min, `abs_cap_deferred`), on `/cancel`, `/new` (both log `reason=cancel`: `/new` goes through the cancel path), restart drain, options or cwd change (`options_changed`; re-checked under the session lock just before a queued follow-up is written, [#1433](https://github.com/littlebearapps/untether/issues/1433)), a transport hot reload to exec (`options_changed`, [#1431](https://github.com/littlebearapps/untether/issues/1431)) and a trust change (`trust_changed`). A pending approval pauses the idle timer. Cron and webhook runs are never kept live (their `approvalPolicy: never` must not take a chat follow-up). Off: `[watchdog] live_sessions = false` or `transport = "exec"` |
@@ -244,7 +308,7 @@ What the Codex runner builds itself, and why (native-first rule, step 4). Checke
 | Preamble | custom (prompt prefix) | 0.170.0, 2026-11-18 (DEC-15, PLAN Q2) | Native `thread/start.developerInstructions` exists, so this fails "no instructions prepended when a system-prompt option exists". The MVP keeps the bridge's prefix, as for every engine, because moving one engine needs a bridge seam; owed as a follow-up |
 | Moderated answers | native passthrough | 0.170.0, 2026-11-18 (E2, PLAN Q6) | `agentMessage.moderation` is untyped (its `display` shape changed in one release); the text is shown as sent and `codex.app_server.moderated` logged once per run |
 | Rows for items exec never emits | custom (rendering) | 0.170.0, 2026-11-19 | `collabAgentToolCall` (sub-agent row), `imageView`, and one generic row per unknown item type (logged once). Untether's own progress surface, fed from native items |
-| Approval cards | native + rendering | 0.171.0, 2026-11-23 (#963) | The three stable approval requests, `serverRequest/resolved` and Codex's own decisions; the card text and buttons are Untether's surface. User input (#965) and MCP elicitation (#1243) are still declined with one ⚠️ row |
+| Approval cards | native + rendering | 0.171.0, 2026-11-23 (#963) | The three stable approval requests, `serverRequest/resolved` and Codex's own decisions; the card text and buttons are Untether's surface. Plan mode questions are buttons (#965, rows below); MCP elicitation (#1243) is still declined with one ⚠️ row |
 | `availableDecisions` read from an experimental field | native by exception (read-only) | 0.171.0, 2026-11-23 (findings H2, P-A) | The schema marks it experimental, yet the server sends it on stable connections (only `additionalPermissions` is stripped). Untether reads it as a hint and never asks for experimental fields |
 | Decision-list fallback | custom | 0.171.0, 2026-11-23 (#963) | The stable schema has no decision list; when `availableDecisions` is absent Untether mirrors Codex's own `default_available_decisions` (approvals.rs L379) so the buttons match what Codex would offer |
 | Deny always offered (`decline`) | custom (policy) | 0.171.0, 2026-11-23 (D2, P-A) | Codex's plain-command default set has no `decline`; it is in the decision enum, and P-A shows Codex accepts it unlisted and carries on. Stop (`cancel`) shows where Codex lists it |
@@ -272,3 +336,13 @@ What the Codex runner builds itself, and why (native-first rule, step 4). Checke
 | `sleep` item (`clock.sleep`) | native item + rendering | 0.171.0, 2026-11-26 (964-0) | The model waiting on a running command or on the user; it carries `durationMs`. Shown as `⏳ sleeping …`; its deadline feeds the stall monitor's expected-wait check (`live_wakeups`), so a long sleep isn't reported as a stall |
 | Waiting flags for the stall watchdogs ([#1412](https://github.com/littlebearapps/untether/issues/1412) item 1) | native `thread/status/changed` (stable) | 0.171.0, 2026-11-26 (probe 1412-1) | `active{activeFlags: [waitingOnApproval]}` arrives just before an approval request and `active[]` once it is answered; any thread's flags (sub-agents too) make `awaiting_user_approval()` true, so a long approval is an expected wait, not a stall. The card fallback stays. On a stable connection `request_user_input` isn't offered, so `waitingOnUserInput` wasn't seen (the model asked in text and waited in a `sleep` item). `systemError` gives one ⚠️ row |
 | `/compact` on app-server ([#964](https://github.com/littlebearapps/untether/issues/964)) | native `thread/compact/start` (stable), custom interception | 0.171.0, 2026-11-26 (964-0 P-C) | Codex's `/compact` is a TUI command, so over app-server the text would reach the model; Untether intercepts a bare `/compact` (with text it's a prompt) and sends the native request on the resumed thread. No session: refused before spawn. The final names no token figures: a resume with `excludeTurns: true` replays no `thread/tokenUsage/updated` (probed; without it one arrives), and the compact turn's own `last` is the compaction request, not the context left. Exec is unchanged (text) |
+| Plan card ([#965](https://github.com/littlebearapps/untether/issues/965)) | custom (no native request) | 0.171.0, 2026-11-28 | Codex sends no plan-approval request; the TUI's "Implement this plan?" is client-side. Untether's card reuses Antigravity's store and callback (D4). The approved prompt "Implement the plan." is the TUI's and `thread/prepareApprovedPlan`'s text; the approved run is Ask me (D2) |
+| plan-auto ([#965](https://github.com/littlebearapps/untether/issues/965)) | custom (sugar) | 0.171.0, 2026-11-28 | Untether approves its own card, as Claude's plan-auto does (#741); the plan is still posted. Opt-in per chat |
+| Default-mode reset ([#965](https://github.com/littlebearapps/untether/issues/965), D1) | custom | 0.171.0, 2026-11-28 (P7) | Codex saves `collaborationMode` on the thread and has no stable way to clear it, so `/planmode off` alone would keep planning. An in-memory marker (`_PLAN_THREADS`) makes the next non-plan run open one experimental connection and send `mode: "default"` |
+| Lost plan marker ⚠️ row ([#965](https://github.com/littlebearapps/untether/issues/965)) | custom (fallback) | 0.171.0, 2026-11-28 (P7) | The marker is lost on restart, `/continue` or a thread planned in the TUI. The stable resume echo (`ThreadResumeResponse.collaborationMode`) shows it, but only an experimental connection can switch, and respawning mid-run would need a second spawn. That one turn plans (chat's tier, no file changes), the row says to resend, and the next run resets |
+| Reset run names the sandbox ([#965](https://github.com/littlebearapps/untether/issues/965)) | custom | 0.171.0, 2026-11-28 (dev-bot run) | An omitted `sandbox` on `thread/resume` keeps the plan turn's `read-only`, so where Full auto omits it the reset run sends Codex's own default (`config/read` `sandbox_mode`, else `workspace-write` for a trusted project); the dev-bot reset run ran `workspace-write` |
+| Preamble skipped on plan turns ([#965](https://github.com/littlebearapps/untether/issues/965)) | custom | 0.171.0, 2026-11-28 | Codex's Plan template governs the output, and the preamble's summary format fights its `<proposed_plan>` block (`preamble.skipped reason=codex_plan_mode`). Other turns keep the preamble (Preamble row above) |
+| Plan checklist row ([#965](https://github.com/littlebearapps/untether/issues/965)) | native, opportunistic | 0.171.0, 2026-11-28 (P7) | `turn/plan/updated` (stable) depends on the model calling `update_plan`; P7 saw none on `gpt-6.1-sol`. A row only when it arrives |
+| Question buttons ([#965](https://github.com/littlebearapps/untether/issues/965)) | native + rendering | 0.171.0, 2026-11-28 (P7) | `item/tool/requestUserInput` is a stable method with an "EXPERIMENTAL" payload, read leniently (null `options`, at most 3 questions and 4 options); the shared ask keyboard is Untether's surface |
+| `isSecret` never echoed ([#965](https://github.com/littlebearapps/untether/issues/965), D5) | custom (policy) | 0.171.0, 2026-11-28 | Codex flags the question, but the answer passes through Telegram and Untether. Untether never repeats, logs or shows it and drops it once sent; the user's own message isn't deleted |
+| Empty answers for unattended runs and Ask mode off ([#965](https://github.com/littlebearapps/untether/issues/965)) | native fallback | 0.171.0, 2026-11-28 | `{answers: {}}` is a valid `ToolRequestUserInputResponse`, and Codex's Plan template has the model carry on with its best judgement when a question comes back unanswered. It replaces the old `-32601` refusal |
