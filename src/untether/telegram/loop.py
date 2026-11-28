@@ -114,7 +114,13 @@ _handle_file_put_default = handle_file_put_default
 _ANSWERED_ECHO_MAX = 300
 
 
-def _format_answered_echo(text: str) -> str:
+# #965 D5: a reply to a secret question (Codex ``isSecret``) is never echoed.
+_SECRET_ANSWER_ECHO = "Answer sent to Codex."
+
+
+def _format_answered_echo(text: str, *, secret: bool = False) -> str:
+    if secret:
+        return _SECRET_ANSWER_ECHO
     if len(text) <= _ANSWERED_ECHO_MAX:
         return f"↩️ Answered: {text}"
     return f"↩️ Answered: {text[: _ANSWERED_ECHO_MAX - 1]}…"
@@ -4298,6 +4304,7 @@ async def run_main_loop(
                     from ..interactive.questions import (
                         answer_ask_question,
                         answer_ask_question_with_options,
+                        ask_flow_is_secret,
                         get_ask_question_flow,
                         get_pending_ask_request,
                     )
@@ -4360,11 +4367,14 @@ async def run_main_loop(
                             return
                         else:
                             # All done — send structured answer
+                            secret = ask_flow_is_secret(flow.request_id)
                             success = await answer_ask_question_with_options(
                                 flow.request_id
                             )
                             if success:
-                                await reply(text=_format_answered_echo(text))
+                                await reply(
+                                    text=_format_answered_echo(text, secret=secret)
+                                )
                             return
 
                     pending_ask = get_pending_ask_request(
@@ -4379,9 +4389,10 @@ async def run_main_loop(
                             request_id=ask_req_id,
                             answer_len=len(text),
                         )
+                        secret = ask_flow_is_secret(ask_req_id)
                         success = await answer_ask_question(ask_req_id, text)
                         if success:
-                            await reply(text=_format_answered_echo(text))
+                            await reply(text=_format_answered_echo(text, secret=secret))
                             return
 
                 # #523: catch `.new`-style leading-dot typos for slash

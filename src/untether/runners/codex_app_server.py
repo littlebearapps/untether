@@ -32,6 +32,13 @@ from anyio.streams.buffered import BufferedByteReceiveStream
 
 from .. import __version__
 from ..events import EventFactory
+from ..interactive.questions import (
+    _ASK_QUESTION_FLOWS,
+    _PENDING_ASK_REQUESTS,
+    AskQuestionState,
+    format_question_message,
+    get_question_option_buttons,
+)
 from ..interactive.registry import drop_session, register, withdraw
 from ..logging import get_logger
 from ..markdown import format_duration
@@ -61,7 +68,7 @@ from ..schemas.codex_app_server import (
 from ..utils.antigravity_argv import COMPACT_COMMAND, native_compact_prompt
 from ..utils.antigravity_context import context_pct
 from ..utils.error_display import redact_url_secrets
-from ..utils.paths import get_run_base_dir, relativize_path
+from ..utils.paths import get_run_base_dir, get_run_channel_id, relativize_path
 from ..utils.streams import _MAX_LINE_BYTES
 from ..utils.subprocess import kill_process, terminate_process
 from . import codex_approvals as approvals
@@ -690,6 +697,8 @@ class AppServerRunState(CodexRunState):
     cards: approvals.CodexApprovals | None = None
     file_changes: dict[str, list[Any]] = field(default_factory=dict)
     diff_preview: bool | None = None
+    # #965: the chat's Ask mode (None = on); off answers questions empty.
+    ask_questions: bool | None = None
     unattended: str | None = None
     unattended_denied: list[str] = field(default_factory=list)
     # A card's Stop (``cancel``) interrupted the turn on purpose.
@@ -958,6 +967,7 @@ class CodexAppServerRunner(CodexRunner):
             _warn_webhook_unknown_mode(webhook, raw_mode)
         state.unattended = run_options.unattended_trigger if run_options else None
         state.diff_preview = run_options.diff_preview if run_options else None
+        state.ask_questions = run_options.ask_questions if run_options else None
         mode = self._permission_mode()
         state.tier = _tier(mode, unattended=bool(state.unattended))
         # #965: experimental only for plan mode, or once to reset a thread
@@ -1369,6 +1379,8 @@ class CodexAppServerRunner(CodexRunner):
             events = self._on_notification(
                 msg, state=state, resume=resume, found_session=found_session
             )
+        elif isinstance(msg, ServerRequest) and msg.method == approvals.USER_INPUT:
+            events = self._question_card(msg, state)
         elif isinstance(msg, ServerRequest):
             events = self._approval_card(msg, state)
         return self._flush_rows(state, events)
@@ -1455,13 +1467,30 @@ class CodexAppServerRunner(CodexRunner):
     def _on_server_request(self, state: AppServerRunState, method: str) -> Any:
         """The peer's observer: an approval in an attended run is deferred to
         a card (#963); anything else the peer declines, and this adds the
-        row (🔒 once per run when unattended, #835)."""
-        if method in approvals.APPROVAL_METHODS:
-            if state.cards is not None:
+        row (🔒 once per run when unattended, #835). A question (#965) is
+        deferred to the ask keyboard unless Ask mode is off; the peer then
+        answers ``{"answers": {}}`` and a quiet note says so."""
+        if method in approvals.APPROVAL_METHODS or method == approvals.USER_INPUT:
+            if state.cards is not None and (
+                method != approvals.USER_INPUT or state.ask_questions is not False
+            ):
                 return DEFER
             if state.unattended is not None:
                 self._unattended_decline(state, method)
                 return None
+        if method == approvals.USER_INPUT and state.ask_questions is False:
+            logger.info("codex.app_server.question.ask_off")
+            state.pending_rows.append(
+                state.factory.action_completed(
+                    action_id="codex.question_off",
+                    kind="note",
+                    title="❓ Codex asked a question; Ask mode is off, so it"
+                    " carries on with its best judgement",
+                    ok=True,
+                    level="info",
+                )
+            )
+            return None
         state.server_requests += 1
         title = (
             _APPROVAL_DECLINED_NOTE
@@ -1574,6 +1603,71 @@ class CodexAppServerRunner(CodexRunner):
             )
         ]
 
+    def _question_card(
+        self, msg: ServerRequest, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#965: a deferred ``requestUserInput`` → the shared ask keyboard
+        (Antigravity's gate questions are the model), registered for a tap
+        or a typed reply."""
+        cards = state.cards
+        params = cas.decode_request(msg.method, msg.params)
+        questions, ids = (
+            approvals.question_flow(params) if params is not None else ([], {})
+        )
+        if cards is None or not questions:
+            logger.warning("codex.app_server.question_unreadable")
+            state.outbox.append(("reply", msg.id, {"answers": {}}))  # type: ignore[arg-type]
+            return []
+        request_id = approvals.new_request_id()
+        action_id = f"codex.question.{request_id}"
+        channel = get_run_channel_id() or 0
+        register(
+            request_id,
+            session_key=cards.session_key,
+            responder=approvals.RESPONDER,
+            tool_name="request_user_input",
+            tool_input={"questions": questions},
+            kind="ask",
+        )
+        flow = AskQuestionState(
+            request_id=request_id, channel_id=channel, questions=questions
+        )
+        _ASK_QUESTION_FLOWS[request_id] = flow
+        _PENDING_ASK_REQUESTS[request_id] = (channel, questions[0]["question"])
+        secret = any(q["secret"] for q in questions)
+        cards.pending[request_id] = approvals.Pending(
+            rpc_id=msg.id,
+            method=msg.method,
+            action_id=action_id,
+            label="question",
+            decisions={},
+            turn_id=state.turn_id,
+            ids=ids,
+            secret=secret,
+        )
+        cards.by_rpc[msg.id] = request_id
+        logger.info(
+            "codex.app_server.question",
+            request_id=request_id,
+            questions=len(questions),
+            options=[len(q["options"]) for q in questions],
+            secret=secret,
+        )
+        return [
+            state.factory.action_started(
+                action_id=action_id,
+                kind="warning",
+                title=format_question_message(flow),
+                detail={
+                    "request_id": request_id,
+                    "tool_name": "ask_question",
+                    "ask_question": questions[0]["question"],
+                    "ask_flow": True,
+                    "inline_keyboard": {"buttons": get_question_option_buttons(flow)},
+                },
+            )
+        ]
+
     def _on_request_resolved(
         self, params: cas.ServerRequestResolvedParams, state: AppServerRunState
     ) -> list[UntetherEvent]:
@@ -1589,6 +1683,30 @@ class CodexAppServerRunner(CodexRunner):
     def _close_card(
         self, state: AppServerRunState, request_id: str, pending: approvals.Pending
     ) -> UntetherEvent:
+        if pending.method == approvals.USER_INPUT:
+            if pending.answer is None:
+                withdraw(request_id)
+                logger.info(
+                    "codex.app_server.question.withdrawn", request_id=request_id
+                )
+                title, ok = approvals.QUESTION_WITHDRAWN, False
+            else:
+                # D5: never the answer itself on a secret question's row.
+                title, ok = (
+                    (
+                        approvals.QUESTION_ANSWERED_SECRET
+                        if pending.secret
+                        else approvals.QUESTION_ANSWERED
+                    ),
+                    True,
+                )
+            return state.factory.action_completed(
+                action_id=pending.action_id,
+                kind="warning",
+                title=title,
+                ok=ok,
+                detail={"request_id": request_id},
+            )
         if pending.answer is None:
             withdraw(request_id)
             logger.info("codex.app_server.approval.withdrawn", request_id=request_id)

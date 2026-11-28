@@ -75,6 +75,8 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("server_request", "item/fileChange/requestApproval"): "S",
     ("server_request", "item/permissions/requestApproval"): "S",
     ("server_request", "mcpServer/elicitation/request"): "S",
+    # #965 questions (plan mode): a card, or {"answers": {}} when nobody asks.
+    ("server_request", "item/tool/requestUserInput"): "S",
 }
 
 # Fields whose tier Untether relies on (#965): plan mode sends the
@@ -112,6 +114,9 @@ CODEX_APP_SERVER_TYPES: dict[str, tuple[str, ...]] = {
     "NetworkPolicyAmendment": (),
     "AdditionalNetworkPermissions": (),
     "AdditionalFileSystemPermissions": (),
+    # #965 question cards (``item/tool/requestUserInput``).
+    "ToolRequestUserInputQuestion": (),
+    "ToolRequestUserInputOption": (),
 }
 
 # Values Untether sends (permission tiers DEC-5/#421, approval answers #963,
@@ -498,6 +503,30 @@ class PermissionsApprovalParams(_Wire):
     permissions: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
+class UserInputOption(_Wire):
+    label: str
+    description: str | None = None
+
+
+class UserInputQuestion(_Wire):
+    """#965 ``ToolRequestUserInputQuestion``: ``options`` may be null (text
+    only); the model can't set ``isSecret`` on 0.171.0 (P7), but it is honoured."""
+
+    id: str
+    question: str
+    header: str = ""
+    is_other: bool = False
+    is_secret: bool = False
+    options: list[UserInputOption] | None = None
+
+
+class UserInputParams(_Wire):
+    thread_id: str
+    turn_id: str = ""
+    item_id: str = ""
+    questions: list[UserInputQuestion] = msgspec.field(default_factory=list)
+
+
 # Notifications whose payload the schema marks [UNSTABLE] (auto-review, Δ D47):
 # read as plain dicts, a missing key gives a generic row, never an error.
 DICT_NOTIFICATIONS = frozenset(
@@ -514,11 +543,12 @@ REQUEST_PARAM_TYPES: dict[str, type[_Wire]] = {
     "item/commandExecution/requestApproval": CommandApprovalParams,
     "item/fileChange/requestApproval": FileChangeApprovalParams,
     "item/permissions/requestApproval": PermissionsApprovalParams,
+    "item/tool/requestUserInput": UserInputParams,
 }
 
 
 def decode_request(method: str, params: Any) -> Any | None:
-    """Approval request params → their struct; None for another method or a
+    """Server request params (approvals, #965 questions) → their struct; None for another method or a
     shape that no longer fits (the caller then declines it). Never raises."""
     cls = REQUEST_PARAM_TYPES.get(method)
     if cls is None:

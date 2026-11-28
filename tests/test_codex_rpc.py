@@ -127,6 +127,7 @@ async def test_late_or_duplicate_response_is_dropped_and_logged() -> None:
         ("item/commandExecution/requestApproval", {"decision": "decline"}),
         ("item/fileChange/requestApproval", {"decision": "decline"}),
         ("mcpServer/elicitation/request", {"action": "decline", "content": None}),
+        ("item/tool/requestUserInput", {"answers": {}}),  # #965
     ],
 )
 async def test_known_server_requests_get_the_schema_shaped_decline(
@@ -149,7 +150,7 @@ async def test_known_server_requests_get_the_schema_shaped_decline(
 async def test_unknown_server_request_gets_method_not_found() -> None:
     sink = Sink()
     peer = CodexRpcPeer(sink.send)
-    await peer.feed(_line({"id": 3, "method": "item/tool/requestUserInput"}))
+    await peer.feed(_line({"id": 3, "method": "item/tool/call"}))
     assert sink.messages[0]["id"] == 3
     assert sink.messages[0]["error"]["code"] == METHOD_NOT_FOUND
 
@@ -239,7 +240,7 @@ async def test_non_deferred_requests_still_declined_beside_a_deferred_one() -> N
     await peer.feed(
         _line({"id": 1, "method": "item/fileChange/requestApproval", "params": {}})
     )
-    await peer.feed(_line({"id": 2, "method": "item/tool/requestUserInput"}))
+    await peer.feed(_line({"id": 2, "method": "item/tool/call"}))
     assert sink.messages[0] == {"id": 1, "result": {"decision": "decline"}}
     assert sink.messages[1]["error"]["code"] == METHOD_NOT_FOUND
 

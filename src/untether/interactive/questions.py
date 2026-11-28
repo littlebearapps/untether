@@ -270,6 +270,13 @@ def get_ask_question_flow_by_id(request_id: str) -> AskQuestionState | None:
     return _ASK_QUESTION_FLOWS.get(request_id)
 
 
+def ask_flow_is_secret(request_id: str) -> bool:
+    """#965 D5: the request's flow has a question an engine marked secret
+    (Codex ``isSecret``): its typed answer is never echoed in the chat."""
+    flow = _ASK_QUESTION_FLOWS.get(request_id)
+    return flow is not None and any(q.get("secret") for q in flow.questions)
+
+
 def option_label(opt: Any, index: int) -> str:
     """The button label of a question option (#960).
 

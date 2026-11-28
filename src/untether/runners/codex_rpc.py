@@ -51,6 +51,8 @@ DECLINE_HANDLERS: dict[str, Handler] = {
         "scope": "turn",
     },
     "mcpServer/elicitation/request": lambda _p: {"action": "decline", "content": None},
+    # #965: no answers; Codex's mode template says carry on with best judgement.
+    "item/tool/requestUserInput": lambda _p: {"answers": {}},
 }
 
 # Returned by ``on_server_request`` to keep a request open for ``reply``.

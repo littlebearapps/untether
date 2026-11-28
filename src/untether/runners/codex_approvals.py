@@ -32,7 +32,8 @@ from ..interactive.preview import (
     format_diff_preview,
     format_unified_diff_preview,
 )
-from ..interactive.registry import Decision
+from ..interactive.questions import _ASK_QUESTION_FLOWS
+from ..interactive.registry import _REQUEST_TO_INPUT, Decision
 from ..logging import get_logger
 from ..markdown import inline_code
 from ..schemas import codex_app_server as cas
@@ -48,6 +49,13 @@ COMMAND_APPROVAL = "item/commandExecution/requestApproval"
 FILE_APPROVAL = "item/fileChange/requestApproval"
 PERMISSIONS_APPROVAL = "item/permissions/requestApproval"
 APPROVAL_METHODS = frozenset({COMMAND_APPROVAL, FILE_APPROVAL, PERMISSIONS_APPROVAL})
+# #965: Plan mode questions, answered from the shared ask keyboard.
+USER_INPUT = "item/tool/requestUserInput"
+MAX_QUESTIONS = 3
+MAX_OPTIONS = 4
+QUESTION_ANSWERED = "❓ answered"
+QUESTION_ANSWERED_SECRET = "❓ answered (hidden)"
+QUESTION_WITHDRAWN = "❓ question withdrawn — Codex stopped waiting"
 _PREFIX_MAX = 40
 
 # Closing row per answer (the card's title after the tap).
@@ -62,6 +70,7 @@ _KIND_NAMES = {
     COMMAND_APPROVAL: "command",
     FILE_APPROVAL: "file change",
     PERMISSIONS_APPROVAL: "permissions",
+    USER_INPUT: "question",
 }
 
 
@@ -85,6 +94,10 @@ class Pending:
     answer: str | None = None
     # #964 §16 item 5: the main turn the card belongs to.
     turn_id: str | None = None
+    # #965 questions: flow question text -> Codex's question id, and whether
+    # any question is ``isSecret`` (D5). Never holds an answer.
+    ids: dict[str, str] = field(default_factory=dict)
+    secret: bool = False
 
 
 @dataclass(slots=True)
@@ -442,6 +455,61 @@ def build_card(
     )
 
 
+def question_flow(
+    params: cas.UserInputParams,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """#965: Codex's questions → the shared ask flow's shape, and the map
+    from each flow question's text back to Codex's id. The flow keys its
+    answers by text, so repeated texts get " (2)", " (3)"…"""
+    questions: list[dict[str, Any]] = []
+    ids: dict[str, str] = {}
+    for q in params.questions[:MAX_QUESTIONS]:
+        text = f"{q.header}: {q.question}" if q.header.strip() else q.question
+        text = " ".join(text.split())
+        if not q.question.strip() or q.id in ids.values():
+            continue
+        base, n = text, 2
+        while text in ids:
+            text, n = f"{base} ({n})", n + 1
+        ids[text] = q.id
+        questions.append(
+            {
+                "question": text,
+                "options": [
+                    {"label": o.label, "description": o.description}
+                    for o in (q.options or [])[:MAX_OPTIONS]
+                ],
+                "multiSelect": False,
+                "id": q.id,
+                "secret": q.is_secret,
+            }
+        )
+    return questions, ids
+
+
+def question_answers(
+    request_id: str, pending: Pending, decision: Decision
+) -> dict[str, Any]:
+    """``ToolRequestUserInputResponse`` from a tap (``answers``: the option
+    flow, by question text) or a typed reply (``answer``: the current
+    question; options already tapped in the flow are kept)."""
+    texts = dict(decision.answers or {})
+    if decision.answer is not None:
+        flow = _ASK_QUESTION_FLOWS.get(request_id)
+        index = flow.current_index if flow is not None else 0
+        if flow is not None:
+            texts.update(flow.answers)
+        order = list(pending.ids)
+        texts[order[min(index, len(order) - 1)]] = decision.answer
+    return {
+        "answers": {
+            pending.ids[text]: {"answers": [answer]}
+            for text, answer in texts.items()
+            if text in pending.ids
+        }
+    }
+
+
 _SHIELD = "\N{SHIELD}\N{VARIATION SELECTOR-16}"
 # review.status → (title verb, ok, warning level).
 _REVIEW_OUTCOMES: dict[str, tuple[str, bool, bool]] = {
@@ -511,6 +579,8 @@ class CodexResponder:
         pending = run.pending.get(request_id) if run is not None else None
         if run is None or pending is None:
             return False
+        if pending.method == USER_INPUT:
+            return await self._answer_question(run, request_id, pending, decision)
         if decision.action in pending.decisions:
             action = decision.action
         else:
@@ -530,6 +600,30 @@ class CodexResponder:
                 method=pending.method,
                 action=action,
                 decision=wire_name(pending.decisions[action]),
+            )
+        return written
+
+    @staticmethod
+    async def _answer_question(
+        run: CodexApprovals, request_id: str, pending: Pending, decision: Decision
+    ) -> bool:
+        result = question_answers(request_id, pending, decision)
+        # D5: the answer is in no store past the reply (the registry drops
+        # the flow right after this returns).
+        _REQUEST_TO_INPUT.pop(request_id, None)
+        try:
+            written = await run.peer.reply(pending.rpc_id, result)
+        except (CodexRpcClosed, CodexRpcWriteTimeout):
+            return False
+        if written:
+            pending.answer = "answered"
+            logger.info(
+                "codex.app_server.question.answered",
+                request_id=request_id,
+                answered=len(result["answers"]),
+                typed=decision.answer is not None,
+                answer_len=len(decision.answer or ""),
+                secret=pending.secret,
             )
         return written
 
