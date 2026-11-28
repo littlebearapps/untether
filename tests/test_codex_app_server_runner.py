@@ -398,7 +398,8 @@ for line in sys.stdin:
         out({"id": rid, "result": {
             "thread": thread(tid), "model": "gpt-fake", "modelProvider": "openai",
             "cwd": p.get("cwd"), "approvalPolicy": p.get("approvalPolicy"),
-            "approvalsReviewer": p.get("approvalsReviewer"), "sandbox": sandbox}})
+            "approvalsReviewer": p.get("approvalsReviewer"), "sandbox": sandbox,
+            "collaborationMode": SC.get("collab_echo")}})
         out({"method": "thread/started", "params": {"thread": thread(tid)}})
         if SC.get("stop_reading_after_thread"):
             time.sleep(30)
