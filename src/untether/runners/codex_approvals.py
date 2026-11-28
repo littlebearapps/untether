@@ -622,7 +622,10 @@ class CodexResponder:
                 request_id=request_id,
                 answered=len(result["answers"]),
                 typed=decision.answer is not None,
-                answer_len=len(decision.answer or ""),
+                # Every answer sent, incl. an "Other" reply carried in the flow.
+                answer_len=sum(
+                    len(a) for v in result["answers"].values() for a in v["answers"]
+                ),
                 secret=pending.secret,
             )
         return written
