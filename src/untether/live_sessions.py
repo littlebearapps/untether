@@ -148,6 +148,8 @@ class _ClaudeLive:
     display_name = "Claude"
     log_ns = "claude"
     supports_steer = True
+    # live_followup passes a ``recheck`` for the write (#1433).
+    rechecks_before_write = True
 
     @staticmethod
     def _claude() -> ModuleType:
@@ -242,6 +244,8 @@ class _CodexLive:
     engine = "codex"
     display_name = "Codex"
     log_ns = "codex"
+    # live_followup passes a ``recheck`` for the write (#1433).
+    rechecks_before_write = True
 
     @staticmethod
     def _cas() -> ModuleType:
@@ -253,8 +257,13 @@ class _CodexLive:
 
     def enabled(self) -> bool:
         # `[watchdog] live_sessions` is read per spawn (as Claude's): a run
-        # not kept live is never accepting.
-        return bool(self._cas().APP_SERVER_ACTIVE)
+        # not kept live is never accepting. #1431: a session kept live before
+        # a hot reload to exec still owns its thread, so it stays reachable
+        # (to be closed: ``pre_inject_close_reason``).
+        cas = self._cas()
+        return bool(cas.APP_SERVER_ACTIVE) or any(
+            s.live_mode and not s.closing for s in cas._RUNS_BY_THREAD.values()
+        )
 
     def _live(self, session_id: str) -> Any:
         return self._cas()._live(session_id)
@@ -302,7 +311,10 @@ class _CodexLive:
         return None if live is None else live.spawn_cwd
 
     def pre_inject_close_reason(self, session_id: str) -> str | None:
-        return None
+        # #1431: the transport changed to exec since spawn: close the idle
+        # session now, so the message resumes through exec at once instead of
+        # waiting out the idle grace.
+        return None if self._cas().APP_SERVER_ACTIVE else "options_changed"
 
     async def close_idle_for_continue(self, cwd: Path | None) -> int:
         return await self._cas().close_idle_for_continue(cwd)

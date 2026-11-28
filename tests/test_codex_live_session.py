@@ -846,3 +846,92 @@ async def test_a_steer_blocked_behind_the_writer_never_writes_after_close() -> N
             await closed.wait()
     assert results == ["window_closed"]
     assert not any(b"turn/steer" in line for line in sent)
+
+
+# --- #1433 / #1431: checks re-run just before the write ---------------------
+
+
+@pytest.mark.anyio
+async def test_1433_options_changed_while_waiting_close_instead_of_writing(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """Approval policy → Ask me while a follow-up waits for the turn: it must
+    not be written into the old process; the idle session closes and the
+    message resumes with the new options."""
+    fake = Fake(tmp_path, complete_delay=0.6)
+    job = ThreadJob(chat_id=1, user_msg_id=2, text="more", resume_token=RESUME)
+    wanted: list[Any] = [None]  # spawned under apply_run_options(None)
+
+    async def options_for(_job: ThreadJob) -> Any:
+        return wanted[0]
+
+    run = LiveRun(_live_runner(fake))
+    outcomes: list[bool] = []
+
+    async def queue() -> None:
+        outcomes.append(await inject_live_followup(job, options_for=options_for))
+
+    with capture_logs() as logs, apply_run_options(None), anyio.fail_after(30):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(run.consume)
+            with anyio.fail_after(10):
+                while THREAD not in gate._RUNS_BY_THREAD or not run.state.turn_open:
+                    await anyio.sleep(0.01)
+            tg.start_soon(queue)
+            await anyio.sleep(0.1)
+            wanted[0] = EngineRunOptions(permission_mode="untrusted")
+            with anyio.fail_after(10):
+                await run.done.wait()
+    assert outcomes == [False]
+    assert len(fake.requests("turn/start")) == 1  # nothing written into it
+    closed = _events(logs, "codex.live_session.stdin_closed")
+    assert [e["reason"] for e in closed] == ["options_changed"]
+
+
+@pytest.mark.anyio
+async def test_1431_transport_switch_to_exec_closes_the_idle_session(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hot reload to ``transport = "exec"`` closes the idle app-server
+    session at once, instead of the next message waiting ~60 s for the idle
+    grace (found in the rc6 attestation, CX-3)."""
+    fake = Fake(tmp_path)
+    job = ThreadJob(chat_id=1, user_msg_id=2, text="TWO", resume_token=RESUME)
+
+    async def body(run: LiveRun) -> None:
+        monkeypatch.setattr(gate, "APP_SERVER_ACTIVE", False)
+        assert BACKEND.enabled() is True  # the session is still reachable
+        assert BACKEND.pre_inject_close_reason(THREAD) == "options_changed"
+        assert await inject_live_followup(job) is False
+        with anyio.fail_after(5):
+            await run.done.wait()
+        assert BACKEND.enabled() is False  # nothing live left
+
+    await _live(fake, body)
+    assert len(fake.requests("turn/start")) == 1
+
+
+@pytest.mark.anyio
+async def test_1425_followup_turn_carries_its_lead_time(
+    tmp_path: Path, project: Path, gate_calls: list[str]
+) -> None:
+    """#815 parity: a follow-up written as the previous turn ended can have
+    run (or finished) before Untether reads its ``turn/started`` — the reader
+    is paused while the bridge delivers the previous final. The TurnEvent says
+    how long ago the follow-up was written, so the footer isn't ``0s``."""
+    fake = Fake(tmp_path, followup={"start_delay": 0.6})
+    job = ThreadJob(chat_id=1, user_msg_id=2, text="more", resume_token=RESUME)
+
+    async def body(run: LiveRun) -> None:
+        assert await inject_live_followup(job) is True
+        await run.until(_turn_done(2))
+
+    run = await _live(fake, body)
+    turns = [e for e in run.events if isinstance(e, TurnEvent)]
+    start, end = turns[0], turns[-1]
+    assert start.phase == "started" and start.reason == "followup"
+    assert start.started_ago_s is not None and start.started_ago_s >= 0.5
+    assert end.started_ago_s is None
