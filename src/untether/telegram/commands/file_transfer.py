@@ -230,7 +230,7 @@ async def _prepare_file_put_plan(
     try:
         run_root = cfg.runtime.resolve_run_cwd(resolved.context)
     except ConfigError as exc:
-        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
+        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP, keep_paths=True))
         return None
     if run_root is None:
         await reply(text="no project context available for file upload.")
@@ -662,7 +662,7 @@ async def _handle_file_get(
     try:
         run_root = cfg.runtime.resolve_run_cwd(resolved.context)
     except ConfigError as exc:
-        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
+        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP, keep_paths=True))
         return
     if run_root is None:
         await reply(text="no project context available for file download.")

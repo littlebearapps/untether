@@ -17,7 +17,11 @@ from untether import runner_bridge as rb
 from untether.markdown import MarkdownPresenter
 from untether.runner_bridge import ExecBridgeConfig, IncomingMessage, handle_message
 from untether.runners.mock import ErrorReturn, Raise, ScriptRunner
-from untether.utils.error_display import NO_CONFIG_PATH, error_reply
+from untether.utils.error_display import (
+    NO_CONFIG_PATH,
+    error_reply,
+    redact_error_secrets,
+)
 
 NEXT_STEP_RE = re.compile(
     r"/(?:new|config|usage|model|reasoning|cancel|auth|export)\b"
@@ -214,3 +218,23 @@ async def test_final_card_masks_credential_shaped_tokens() -> None:
     assert "request failed" in text
     assert "abcdef0123456789xyz" not in text
     assert "SECRETSECRETSECRET" not in text
+
+
+@pytest.mark.anyio
+async def test_deliberate_stop_gets_no_fallback() -> None:
+    text = await _card_text(
+        [ErrorReturn(error="Stopped: tell Codex", usage={"user_stopped": True})]
+    )
+    assert eh.FALLBACK_HINT not in text
+
+
+def test_marker_exemption_needs_the_whole_value() -> None:
+    assert redact_error_secrets("password=actual-secret[REDACTED]") == "[secret]]"
+    assert redact_error_secrets("token=[REDACTED]") == "token=[REDACTED]"
+
+
+def test_error_reply_keep_paths_keeps_the_directory() -> None:
+    exc = RuntimeError("/srv/p/.worktrees/x exists but is not a git worktree")
+    text = error_reply(exc, "Fix it.", keep_paths=True)
+    assert "/srv/p/.worktrees/x" in text
+    assert "[path]" in error_reply(exc, "Fix it.")

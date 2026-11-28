@@ -2408,6 +2408,9 @@ class CodexAppServerRunner(CodexRunner):
             resets_at = codex_reads.limit_resets_at(cached) if cached else None
             if resets_at:
                 usage["codex_resets_at"] = resets_at
+        if error == _STOPPED_BY_CARD:
+            # #1196: a deliberate stop, so the card gets no "send again" fallback.
+            usage = {**(usage or {}), "user_stopped": True}
         return [*rows, self._error(state, resume, error, usage)]
 
     def _later_turn_completed(

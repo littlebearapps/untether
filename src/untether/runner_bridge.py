@@ -8487,7 +8487,11 @@ async def handle_message(
                 hint = _SESSION_NOT_FOUND_CLEARED_HINT
             # #1196: every error card names a next step. A cleared session's
             # notice is its own ("your next message starts a new session").
-            if not hint and not _session_auto_cleared:
+            if (
+                not hint
+                and not _session_auto_cleared
+                and not (completed.usage or {}).get("user_stopped")
+            ):
                 hint = FALLBACK_HINT
             if final_answer.strip():
                 # Deduplicate: if the answer already starts with the error's

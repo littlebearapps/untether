@@ -336,7 +336,7 @@ async def _run_engine(
         try:
             cwd = runtime.resolve_run_cwd(context)
         except ConfigError as exc:
-            await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
+            await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP, keep_paths=True))
             return
         logger.info(
             "handle.engine_resolved",
