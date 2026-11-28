@@ -78,7 +78,8 @@ DIRECTIVE_NEXT_STEP = (
     "Fix the directive at the start of your message, then send it again."
 )
 RUN_CWD_NEXT_STEP = (
-    "Check this project's settings in untether.toml, then send your message again."
+    "Check the @branch in your message (if any) and this project's settings in"
+    " untether.toml, then send your message again."
 )
 ENGINE_UNAVAILABLE_NEXT_STEP = (
     "Check that the engine's CLI is installed on the host and its settings in"
