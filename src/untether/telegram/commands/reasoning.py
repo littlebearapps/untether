@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from ...context import RunContext
 from ...logging import get_logger
+from ...utils.error_display import NO_CONFIG_PATH
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import (
     allowed_reasoning_levels,
@@ -169,7 +170,7 @@ async def _handle_reasoning_command(
                     current, reasoning=normalized_level
                 ),
                 topic_unavailable="topic reasoning overrides are unavailable.",
-                chat_unavailable="chat reasoning overrides are unavailable (no config path).",
+                chat_unavailable=f"chat reasoning overrides are unavailable {NO_CONFIG_PATH}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -250,7 +251,7 @@ async def _handle_reasoning_command(
                 engine=engine,
                 update=lambda current: with_override(current, reasoning=None),
                 topic_unavailable="topic reasoning overrides are unavailable.",
-                chat_unavailable="chat reasoning overrides are unavailable (no config path).",
+                chat_unavailable=f"chat reasoning overrides are unavailable {NO_CONFIG_PATH}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

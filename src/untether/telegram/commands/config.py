@@ -14,7 +14,7 @@ from ...ids import DEPRECATED_ENGINES
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, is_claude_prompting_mode
 from ...transport import RenderedMessage
-from ...utils.error_display import redact_url_secrets
+from ...utils.error_display import NO_CONFIG_PATH, redact_url_secrets
 from . import _antigravity_mode_text as agy_mode
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
@@ -824,7 +824,7 @@ async def _page_planmode(ctx: CommandContext, action: str | None = None) -> None
     if config_path is None:
         await _respond(
             ctx,
-            "<b>📋 Permission mode</b>\n\nUnavailable (no config path).",
+            f"<b>📋 Permission mode</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1198,7 +1198,7 @@ async def _page_loop(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>🔁 Loop mode</b>\n\nUnavailable (no config path).",
+            f"<b>🔁 Loop mode</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1389,7 +1389,7 @@ async def _page_engine(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>⚙️ Engine & model</b>\n\nUnavailable (no config path).",
+            f"<b>⚙️ Engine & model</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1520,7 +1520,7 @@ async def _page_trigger(ctx: CommandContext, action: str | None = None) -> None:
     if config_path is None:
         await _respond(
             ctx,
-            "<b>📡 Listen mode</b>\n\nUnavailable (no config path).",
+            f"<b>📡 Listen mode</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1617,7 +1617,7 @@ async def _page_followup(ctx: CommandContext, action: str | None = None) -> None
     if config_path is None:
         await _respond(
             ctx,
-            "<b>↪️ Follow-up mode</b>\n\nUnavailable (no config path).",
+            f"<b>↪️ Follow-up mode</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -1868,7 +1868,7 @@ async def _page_reasoning(ctx: CommandContext, action: str | None = None) -> Non
     if config_path is None:
         await _respond(
             ctx,
-            "<b>🧠 Reasoning</b>\n\nUnavailable (no config path).",
+            f"<b>🧠 Reasoning</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2104,7 +2104,7 @@ async def _page_ask_questions(ctx: CommandContext, action: str | None = None) ->
     if config_path is None:
         await _respond(
             ctx,
-            "<b>❓ Ask mode</b>\n\nUnavailable (no config path).",
+            f"<b>❓ Ask mode</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2492,7 +2492,7 @@ async def _page_diff_preview(ctx: CommandContext, action: str | None = None) -> 
     if config_path is None:
         await _respond(
             ctx,
-            "<b>📝 Diff preview</b>\n\nUnavailable (no config path).",
+            f"<b>📝 Diff preview</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -2665,7 +2665,7 @@ async def _page_web_search(ctx: CommandContext, action: str | None = None) -> No
     config_path = ctx.config_path
     if config_path is None:
         await _respond(
-            ctx, "<b>🌐 Web search</b>\n\nUnavailable (no config path).", back
+            ctx, f"<b>🌐 Web search</b>\n\nUnavailable {NO_CONFIG_PATH}", back
         )
         return
     current_engine, _ = await _resolve_effective_engine(ctx)
@@ -2769,7 +2769,7 @@ async def _page_cost_usage(ctx: CommandContext, action: str | None = None) -> No
     if config_path is None:
         await _respond(
             ctx,
-            "<b>💰 Cost & usage</b>\n\nUnavailable (no config path).",
+            f"<b>💰 Cost & usage</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return
@@ -3001,7 +3001,7 @@ async def _page_resume_line(ctx: CommandContext, action: str | None = None) -> N
     if config_path is None:
         await _respond(
             ctx,
-            "<b>↩️ Resume line</b>\n\nUnavailable (no config path).",
+            f"<b>↩️ Resume line</b>\n\nUnavailable {NO_CONFIG_PATH}",
             [[{"text": "← Back", "callback_data": "config:home"}]],
         )
         return

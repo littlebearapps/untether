@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...directives import DirectiveError
 from ...transport_runtime import ResolvedMessage
+from ...utils.error_display import DIRECTIVE_NEXT_STEP, error_reply
 from ..context import _merge_topic_context
 from ..files import parse_file_command
 from ..topic_state import TopicStateStore
@@ -97,7 +98,7 @@ async def _handle_media_group(
                         chat_id=command_msg.chat_id,
                     )
                 except DirectiveError as exc:
-                    await reply(text=f"error:\n{exc}")
+                    await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
                     return
             else:
                 resolved = await resolve_prompt(

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from ...context import RunContext
 from ...logging import get_logger
 from ...utils.engine_argv import model_problem, safe_preview
-from ...utils.error_display import redact_url_secrets
+from ...utils.error_display import NO_CONFIG_PATH, redact_url_secrets
 from ..chat_prefs import ChatPrefsStore
 from ..engine_overrides import resolve_override_value, with_override
 from ..files import split_command_args
@@ -222,7 +222,7 @@ async def _handle_model_command(
                 engine=engine,
                 update=lambda current: with_override(current, model=model),
                 topic_unavailable="topic model overrides are unavailable.",
-                chat_unavailable="chat model overrides are unavailable (no config path).",
+                chat_unavailable=f"chat model overrides are unavailable {NO_CONFIG_PATH}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -295,7 +295,7 @@ async def _handle_model_command(
                 engine=engine,
                 update=lambda current: with_override(current, model=None),
                 topic_unavailable="topic model overrides are unavailable.",
-                chat_unavailable="chat model overrides are unavailable (no config path).",
+                chat_unavailable=f"chat model overrides are unavailable {NO_CONFIG_PATH}",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

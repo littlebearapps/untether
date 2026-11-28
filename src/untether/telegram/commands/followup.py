@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...utils.error_display import NO_CONFIG_PATH
 from ..chat_prefs import ChatPrefsStore, shared_prefs_store
 from ..followup_mode import FollowupMode, resolve_followup_mode
 from ..topic_state import TopicStateStore
@@ -103,7 +104,7 @@ async def handle_followup_default_command(
         await chat_prefs.set_followup_mode(msg.chat_id, mode)
         scope = "this chat"
     else:
-        await reply(text="follow-up settings are unavailable (no config path).")
+        await reply(text=f"follow-up settings are unavailable {NO_CONFIG_PATH}")
         return
     engine = None
     try:
@@ -157,7 +158,7 @@ class FollowupCommand:
             )
         if ctx.config_path is None:
             return CommandResult(
-                text="follow-up settings are unavailable (no config path).",
+                text=f"follow-up settings are unavailable {NO_CONFIG_PATH}",
                 notify=False,
             )
         prefs = shared_prefs_store(ctx.config_path)

@@ -12,6 +12,7 @@ from ...context import RunContext
 from ...directives import DirectiveError
 from ...logging import get_logger
 from ...transport_runtime import ResolvedMessage
+from ...utils.error_display import DIRECTIVE_NEXT_STEP, RUN_CWD_NEXT_STEP, error_reply
 from ..context import _format_context
 from ..files import (
     PathAccess,
@@ -213,7 +214,7 @@ async def _prepare_file_put_plan(
             chat_id=msg.chat_id,
         )
     except DirectiveError as exc:
-        await reply(text=f"error:\n{exc}")
+        await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
         return None
     topic_key = _topic_key(msg, cfg) if topic_store is not None else None
     await _maybe_update_topic_context(
@@ -229,7 +230,7 @@ async def _prepare_file_put_plan(
     try:
         run_root = cfg.runtime.resolve_run_cwd(resolved.context)
     except ConfigError as exc:
-        await reply(text=f"error:\n{exc}")
+        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
         return None
     if run_root is None:
         await reply(text="no project context available for file upload.")
@@ -645,7 +646,7 @@ async def _handle_file_get(
             chat_id=msg.chat_id,
         )
     except DirectiveError as exc:
-        await reply(text=f"error:\n{exc}")
+        await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
         return
     topic_key = _topic_key(msg, cfg) if topic_store is not None else None
     await _maybe_update_topic_context(
@@ -661,7 +662,7 @@ async def _handle_file_get(
     try:
         run_root = cfg.runtime.resolve_run_cwd(resolved.context)
     except ConfigError as exc:
-        await reply(text=f"error:\n{exc}")
+        await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
         return
     if run_root is None:
         await reply(text="no project context available for file download.")

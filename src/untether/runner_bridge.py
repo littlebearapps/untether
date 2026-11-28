@@ -31,6 +31,8 @@ from .background_status import (
     wake_fold_decision,
 )
 from .context import RunContext
+from .error_hints import FALLBACK_HINT
+from .error_hints import SESSION_NOT_FOUND_HINT as _SESSION_NOT_FOUND_HINT
 from .error_hints import SESSION_NOT_LOADED_HINT as _SESSION_NOT_LOADED_HINT
 from .error_hints import codex_error_info_hint as _codex_error_info_hint
 from .error_hints import get_error_hint as _get_error_hint
@@ -84,7 +86,7 @@ from .transport import (
     message_kind,
 )
 from .utils import engine_argv
-from .utils.error_display import redact_url_secrets
+from .utils.error_display import redact_error_secrets, redact_url_secrets
 
 logger = get_logger(__name__)
 
@@ -2571,6 +2573,22 @@ def _compaction_empty_body(compaction: Mapping[str, Any]) -> str:
     return body
 
 
+# #1196: the stall watchdog's cancel notices. The reason codes
+# (``max_warnings``, untether#322 / claude-code#39700) go to the log only.
+_AUTO_CANCEL_NOTICE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Auto-cancelled: this run"
+    " stopped making progress. Send your message again to carry on; if it"
+    " keeps happening, /new starts a fresh session."
+)
+_STUCK_AFTER_TOOL_RESULT_NOTICE = (
+    "\N{WARNING SIGN}\N{VARIATION SELECTOR-16} Auto-cancelled: the engine"
+    " stopped responding after a tool finished. Send your message again to"
+    " carry on; if it keeps happening, /new starts a fresh session."
+)
+# #1196: a runner exception with no message. The class name stays in the log.
+_NO_DETAIL_ERROR = "Untether hit an unexpected error with no details."
+
+
 def _format_error(error: BaseException) -> str:
     cancel_exc = anyio.get_cancelled_exc_class()
     flattened = [
@@ -2579,12 +2597,12 @@ def _format_error(error: BaseException) -> str:
         if not isinstance(exc, cancel_exc)
     ]
     if len(flattened) == 1:
-        return str(flattened[0]) or flattened[0].__class__.__name__
+        return str(flattened[0]) or _NO_DETAIL_ERROR
     if not flattened:
-        return str(error) or error.__class__.__name__
+        return str(error) or _NO_DETAIL_ERROR
     messages = [str(exc) for exc in flattened if str(exc)]
     if not messages:
-        return str(error) or error.__class__.__name__
+        return str(error) or _NO_DETAIL_ERROR
     if len(messages) == 1:
         return messages[0]
     return "\n".join(messages)
@@ -3675,9 +3693,7 @@ class ProgressEdits:
                 try:
                     await self.transport.send(
                         channel_id=self.channel_id,
-                        message=RenderedMessage(
-                            text=f"Auto-cancelled: session appears stuck ({auto_cancel_reason})."
-                        ),
+                        message=RenderedMessage(text=_AUTO_CANCEL_NOTICE),
                         options=SendOptions(thread_id=self.thread_id),
                     )
                 except Exception:  # noqa: BLE001
@@ -5014,12 +5030,7 @@ class ProgressEdits:
             try:
                 await self.transport.send(
                     channel_id=self.channel_id,
-                    message=RenderedMessage(
-                        text=(
-                            "Auto-cancelled: stuck after tool_result "
-                            "(see untether#322 / claude-code#39700)."
-                        )
-                    ),
+                    message=RenderedMessage(text=_STUCK_AFTER_TOOL_RESULT_NOTICE),
                     options=SendOptions(thread_id=self.thread_id),
                 )
             except Exception:  # noqa: BLE001
@@ -6793,9 +6804,21 @@ def _run_error_hint(
     if close_reason == "abs_cap":
         return _ABS_CAP_HINT
     # #962: Codex app-server's typed error outranks the text patterns.
-    hint = _codex_error_info_hint(
-        (usage or {}).get("codex_error_info"), (usage or {}).get("codex_resets_at")
-    ) or _get_error_hint(raw_error)
+    # #1196: Claude's turn / budget limit, whatever the result text says.
+    subtype = (usage or {}).get("subtype")
+    limit_hint = (
+        _get_error_hint(subtype)
+        if subtype in ("error_max_turns", "error_max_budget_usd")
+        else None
+    )
+    hint = (
+        _codex_error_info_hint(
+            (usage or {}).get("codex_error_info"),
+            (usage or {}).get("codex_resets_at"),
+        )
+        or limit_hint
+        or _get_error_hint(raw_error)
+    )
     if hint == _SESSION_NOT_LOADED_HINT:
         turns = (usage or {}).get("num_turns")
         if isinstance(turns, int) and not isinstance(turns, bool) and turns > 0:
@@ -7427,6 +7450,10 @@ _SESSION_NOT_LOADED_CLEARED_HINT = (
     "The session could not be loaded \N{EM DASH} Claude Code may have"
     " archived or expired it. Just send your message again to start a fresh"
     " session."
+)
+_SESSION_NOT_FOUND_CLEARED_HINT = (
+    "The saved session wasn't found \N{EM DASH} it may have been deleted or"
+    " expired. Just send your message again to start a fresh session."
 )
 # #1047: pre-spawn refusals (``usage[PRESPAWN_BLOCKED_KEY]``) that are
 # answered with their own text alone, in place of the progress card: no
@@ -8435,7 +8462,8 @@ async def handle_message(
             # and query values masked (a model id the user set, a provider's
             # callback link). The hint and the resume checks read the raw
             # text; the ``runner.completed`` log has its own redaction.
-            shown_error = redact_url_secrets(raw_error)
+            # #1196: credential-shaped tokens (``sk-…``, Bearer) are masked too.
+            shown_error = redact_error_secrets(raw_error)
             # #887: the hint depends on why the session ended and on whether
             # the run had any turns, not just on the error text.
             hint = (
@@ -8455,6 +8483,12 @@ async def handle_message(
             # don't also tell the user to send /new.
             if _session_auto_cleared and hint == _SESSION_NOT_LOADED_HINT:
                 hint = _SESSION_NOT_LOADED_CLEARED_HINT
+            elif _session_auto_cleared and hint == _SESSION_NOT_FOUND_HINT:
+                hint = _SESSION_NOT_FOUND_CLEARED_HINT
+            # #1196: every error card names a next step. A cleared session's
+            # notice is its own ("your next message starts a new session").
+            if not hint and not _session_auto_cleared:
+                hint = FALLBACK_HINT
             if final_answer.strip():
                 # Deduplicate: if the answer already starts with the error's
                 # first line (common when runner sets both answer and error
@@ -8467,7 +8501,7 @@ async def handle_message(
                     # #1151: here the answer IS the error text (OpenCode with
                     # no assistant text, a Claude error result) — mask it too.
                     _, _, remainder = shown_error.partition("\n")
-                    parts: list[str] = [redact_url_secrets(final_answer)]
+                    parts: list[str] = [redact_error_secrets(final_answer)]
                     if hint:
                         parts.append(f"\N{ELECTRIC LIGHT BULB} {hint}")
                     if remainder.strip():
@@ -9979,7 +10013,7 @@ async def handle_message(
             )
             sync_resume_token(progress_tracker, outcome.resume)
             raw_err = _format_error(error)
-            hint = _get_error_hint(raw_err)
+            hint = _get_error_hint(raw_err) or FALLBACK_HINT
             # #1065: a runner exception can quote a user-typed value (the
             # "emitted session id … but expected …" check) or a path, so the
             # card gets the shared stderr sanitiser (#1033: URLs incl. their

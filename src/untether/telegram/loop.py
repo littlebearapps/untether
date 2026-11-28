@@ -32,6 +32,7 @@ from ..scheduler import ThreadJob, ThreadScheduler
 from ..settings import TelegramTransportSettings
 from ..transport import MessageRef, RenderedMessage, SendOptions, message_kind
 from ..transport_runtime import ResolvedMessage
+from ..utils.error_display import DIRECTIVE_NEXT_STEP, error_reply
 from . import arrival_order, first_start, settings_barrier
 from .approval_originator import note_message_sender
 from .bridge import CANCEL_CALLBACK_DATA, TelegramBridgeConfig, send_plain
@@ -3390,7 +3391,7 @@ async def run_main_loop(
                         chat_id=msg.chat_id,
                     )
                 except DirectiveError as exc:
-                    await reply(text=f"error:\n{exc}")
+                    await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
                     return None
                 topic_key = resolve_topic_key(msg)
                 chat_project = (
@@ -3854,7 +3855,7 @@ async def run_main_loop(
                         chat_id=msg.chat_id,
                     )
                 except DirectiveError as exc:
-                    await reply(text=f"error:\n{exc}")
+                    await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
                     return
                 if pending.is_voice_transcribed:
                     resolved = ResolvedMessage(

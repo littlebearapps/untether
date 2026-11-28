@@ -17,6 +17,18 @@ SESSION_NOT_LOADED_HINT = (
     "The session could not be loaded \N{EM DASH} Claude Code may have"
     " archived or expired it. Send /new to start a fresh session."
 )
+# #1196: OpenCode's NotFoundError for a resumed session. The bridge swaps it
+# for a "just send again" wording when it has already cleared the session.
+SESSION_NOT_FOUND_HINT = (
+    "The saved session wasn't found \N{EM DASH} it may have been deleted or"
+    " expired. Send /new to start a fresh session."
+)
+# #1196: the next step on an error card when no hint matches the error text,
+# so every error card says what to do.
+FALLBACK_HINT = (
+    "Send your message again. If it keeps failing, /new starts a fresh"
+    " session \N{EM DASH} or /export this chat and report it."
+)
 
 _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Engine end-of-life / unsupported client ---
@@ -91,7 +103,9 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Authentication ---
     (
         "isn't signed in on this host",
-        'On a server, the Gemini API key route (`modelProvider: "gemini"` +'
+        "Run `agy` once in a terminal on the host to sign in, then send your"
+        " message again. On a server, the Gemini API key route"
+        ' (`modelProvider: "gemini"` +'
         " `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids"
         " interactive sign-in.",
     ),
@@ -209,11 +223,11 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Rate limits ---
     (
         "rate limit",
-        "Rate limited \N{EM DASH} the engine will retry automatically.",
+        "Rate limited \N{EM DASH} wait a minute, then send your message again.",
     ),
     (
         "too many requests",
-        "Rate limited \N{EM DASH} the engine will retry automatically.",
+        "Rate limited \N{EM DASH} wait a minute, then send your message again.",
     ),
     # --- Model errors ---
     # Antigravity (#558): every agy model/effort rejection starts "invalid
@@ -329,12 +343,14 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
     # --- Session errors ---
     (
         "session not found",
-        "Try a fresh session without --session flag.",
+        SESSION_NOT_FOUND_HINT,
     ),
     # --- Network / connection errors ---
     (
         "connection refused",
-        "Check that the target service is running.",
+        "The engine couldn't reach a service it needs (connection refused)."
+        " Check that the service (a local model server or proxy, for example)"
+        " is running on the host, then send your message again.",
     ),
     (
         "connecttimeout",
@@ -413,6 +429,19 @@ _HINT_PATTERNS: list[tuple[str, str]] = [
         "The engine exited before establishing a session."
         " This usually means it crashed during startup."
         " Check that the engine CLI is installed and working, then try again.",
+    ),
+    # --- Claude result limits (a trigger's max_turns / max_budget_usd) ---
+    (
+        "error_max_turns",
+        "Claude Code stopped at its turn limit before finishing (a trigger's"
+        " max_turns in untether.toml). Your session is saved \N{EM DASH} send"
+        " a message to carry on, or raise max_turns for the trigger.",
+    ),
+    (
+        "error_max_budget_usd",
+        "Claude Code stopped at its spending cap before finishing (a trigger's"
+        " max_budget_usd in untether.toml). Your session is saved \N{EM DASH}"
+        " send a message to carry on, or raise max_budget_usd for the trigger.",
     ),
     # --- Engine-specific errors ---
     (

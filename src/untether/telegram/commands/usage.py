@@ -23,6 +23,7 @@ import httpx
 
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
+from ...utils.error_display import user_safe_error
 
 if TYPE_CHECKING:
     from ...runners.antigravity import AntigravityRunner
@@ -479,8 +480,8 @@ async def _antigravity_credits_line(runner: AntigravityRunner) -> str | None:
         return None
     except agy_quota.AgySlashError as exc:
         return f"AI credits: couldn't read ({_slash_error_reason(exc.kind)})."
-    except Exception as exc:  # noqa: BLE001 — logged by the cache
-        return f"AI credits: couldn't read ({html.escape(type(exc).__name__)})."
+    except Exception:  # noqa: BLE001 — logged by the cache
+        return "AI credits: couldn't read (unexpected error)."
     return agy_quota.format_credits_html(credits)
 
 
@@ -526,9 +527,10 @@ async def _antigravity_usage_reply(
                 lines.append(
                     f"Couldn't read agy's quota ({_slash_error_reason(exc.kind)})."
                 )
-        except Exception as exc:  # noqa: BLE001 — logged by the cache
+        except Exception:  # noqa: BLE001 — logged by the cache
             lines.append(
-                f"Couldn't read agy's quota ({html.escape(type(exc).__name__)})."
+                "Couldn't read agy's quota (unexpected error) \N{EM DASH}"
+                " try /usage again shortly."
             )
         else:
             lines.extend(agy_quota.format_quota_html(snapshot.groups))
@@ -636,7 +638,10 @@ def _codex_error_line(exc: Exception) -> str:
                 " — try again shortly."
             )
         return f"Couldn't read Codex's quota ({_slash_error_reason(exc.kind)})."
-    return f"Couldn't read Codex's quota ({html.escape(type(exc).__name__)})."
+    return (
+        "Couldn't read Codex's quota (unexpected error) \N{EM DASH}"
+        " try /usage again shortly."
+    )
 
 
 def _codex_debug_lines() -> list[str]:
@@ -764,10 +769,14 @@ class UsageCommand:
                 )
             if status == 403:
                 return CommandResult(
-                    text="Claude Code OAuth token lacks user:profile scope.",
+                    text="Claude Code's login can't read usage (it lacks the"
+                    " user:profile scope). Run `claude auth login` on the host"
+                    " to sign in again, then try /usage.",
                     notify=True,
                 )
-            hint = _HTTP_STATUS_HINTS.get(status, "Unexpected error.")
+            hint = _HTTP_STATUS_HINTS.get(
+                status, "Unexpected error \N{EM DASH} try /usage again in a minute."
+            )
             if status == 429:
                 logger.warning("usage.rate_limited", status=status)
             else:
@@ -793,7 +802,9 @@ class UsageCommand:
         except Exception as exc:
             logger.exception("usage.fetch_failed", error=str(exc))
             return CommandResult(
-                text=f"Failed to fetch usage: {type(exc).__name__}: {exc}",
+                text="Couldn't fetch usage"
+                f" ({user_safe_error(exc, fallback='unexpected error')})"
+                " \N{EM DASH} try /usage again in a minute.",
                 notify=True,
             )
 

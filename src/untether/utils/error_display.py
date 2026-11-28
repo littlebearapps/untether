@@ -73,6 +73,42 @@ def user_safe_error(
     return text
 
 
+# #1196: the next step for each family of command error replies.
+DIRECTIVE_NEXT_STEP = (
+    "Fix the directive at the start of your message, then send it again."
+)
+RUN_CWD_NEXT_STEP = (
+    "Check this project's settings in untether.toml, then send your message again."
+)
+ENGINE_UNAVAILABLE_NEXT_STEP = (
+    "Check that the engine's CLI is installed on the host and its settings in"
+    " untether.toml, or switch engines in /config."
+)
+# #1196: replaces "(no config path)" on every settings command.
+NO_CONFIG_PATH = (
+    "\N{EM DASH} Untether wasn't started from an untether.toml, so there's"
+    " nowhere to save this setting. Restart it with a config file to change it."
+)
+
+
+def error_reply(exc: BaseException | str, next_step: str) -> str:
+    """#1196: a command's error reply \N{EM DASH} the sanitised error, then
+    what to do about it."""
+    error = user_safe_error(exc, fallback="Something went wrong.")
+    return f"\N{CROSS MARK} {error}\n{next_step}"
+
+
+def redact_error_secrets(text: str) -> str:
+    """#1196: an engine error for a card \N{EM DASH} credential-shaped tokens
+    masked, then ``redact_url_secrets``. Unlike ``user_safe_error`` it keeps
+    the text's length, paths and URLs readable."""
+    text = redact_url_secrets(text)
+    # A URL parameter ``redact_url_secrets`` already masked keeps its marker.
+    return _SECRET_RE.sub(
+        lambda m: m.group(0) if "[REDACTED" in m.group(0) else "[secret]", text
+    )
+
+
 # #1151: an engine's own error text (OpenCode ``error`` event, Codex
 # ``turn.failed`` / API-error JSON, a Claude error ``result``, Pi
 # ``errorMessage``) can quote a URL — a model id the user set, a provider's

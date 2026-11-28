@@ -29,6 +29,11 @@ from ...runners.run_options import EngineRunOptions, apply_run_options
 from ...scheduler import ThreadScheduler
 from ...transport import MessageRef, RenderedMessage, SendOptions
 from ...transport_runtime import TransportRuntime
+from ...utils.error_display import (
+    ENGINE_UNAVAILABLE_NEXT_STEP,
+    RUN_CWD_NEXT_STEP,
+    error_reply,
+)
 from ...utils.paths import (
     reset_run_base_dir,
     reset_run_channel_id,
@@ -199,7 +204,7 @@ async def _send_runner_unavailable(
         state,
         elapsed_s=0.0,
         status="error",
-        answer=f"error:\n{reason}",
+        answer=error_reply(reason, ENGINE_UNAVAILABLE_NEXT_STEP),
     )
     reply_to = MessageRef(channel_id=chat_id, message_id=user_msg_id)
     await exec_cfg.transport.send(
@@ -301,7 +306,7 @@ async def _run_engine(
                 engine_override=engine_override,
             )
         except RunnerUnavailableError as exc:
-            await reply(text=f"error:\n{exc}")
+            await reply(text=error_reply(exc, ENGINE_UNAVAILABLE_NEXT_STEP))
             return
         runner: Runner = entry.runner
         effective_resume = show_resume_line
@@ -331,7 +336,7 @@ async def _run_engine(
         try:
             cwd = runtime.resolve_run_cwd(context)
         except ConfigError as exc:
-            await reply(text=f"error:\n{exc}")
+            await reply(text=error_reply(exc, RUN_CWD_NEXT_STEP))
             return
         logger.info(
             "handle.engine_resolved",

@@ -4285,7 +4285,7 @@ async def test_stall_auto_cancel_dead_process() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "process_dead" in auto_cancel_msgs[0]["message"].text
+    assert "process_dead" not in auto_cancel_msgs[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -4324,7 +4324,7 @@ async def test_stall_auto_cancel_no_pid_no_events() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "no_pid_no_events" in auto_cancel_msgs[0]["message"].text
+    assert "no_pid_no_events" not in auto_cancel_msgs[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -4371,7 +4371,7 @@ async def test_994_no_pid_no_events_auto_cancel_survives_render_bumps() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "no_pid_no_events" in auto_cancel_msgs[0]["message"].text
+    assert "no_pid_no_events" not in auto_cancel_msgs[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -4457,7 +4457,7 @@ async def test_stall_auto_cancel_max_warnings() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "max_warnings" in auto_cancel_msgs[0]["message"].text
+    assert "max_warnings" not in auto_cancel_msgs[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -5646,7 +5646,7 @@ async def test_stall_auto_cancel_fires_with_flat_cpu() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "max_warnings" in auto_cancel_msgs[0]["message"].text
+    assert "max_warnings" not in auto_cancel_msgs[0]["message"].text
 
 
 @pytest.mark.anyio
@@ -8391,8 +8391,8 @@ class TestHandleStuckAfterToolResult:
         assert edits.cancel_event.is_set()
         # The cancellation message was sent to the transport
         texts = [c["message"].text for c in edits.transport.send_calls]
-        assert any("stuck after tool_result" in t for t in texts)
-        assert any("#322" in t for t in texts)
+        assert any("stopped responding after a tool finished" in t for t in texts)
+        assert not any("#322" in t for t in texts)
 
     @pytest.mark.anyio
     async def test_on_event_clears_stuck_state(self) -> None:
@@ -11681,7 +11681,7 @@ async def test_650_process_dead_without_delivery_still_alarms() -> None:
         c for c in transport.send_calls if "Auto-cancelled" in c["message"].text
     ]
     assert len(auto_cancel_msgs) == 1
-    assert "process_dead" in auto_cancel_msgs[0]["message"].text
+    assert "process_dead" not in auto_cancel_msgs[0]["message"].text
 
 
 # ---------------------------------------------------------------------------

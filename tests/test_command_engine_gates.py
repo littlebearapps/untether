@@ -528,7 +528,7 @@ class TestUsageAntigravity:
             ),
             (
                 lambda q: RuntimeError("secret <path> /home/nathan/token"),
-                "AI credits: couldn't read (RuntimeError).",
+                "AI credits: couldn't read (unexpected error).",
             ),
             (lambda q: {"remaining_credits": "<b>lots</b>"}, None),
             (lambda q: q.AntigravityNotSignedIn(), None),
@@ -630,7 +630,7 @@ class TestUsageAntigravity:
             ),
             (
                 lambda q: RuntimeError("secret <path> /home/nathan/token"),
-                "RuntimeError",
+                "(unexpected error)",
                 "/home/nathan",
             ),
             (
