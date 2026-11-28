@@ -414,6 +414,13 @@
    },
    "tier": "S"
   },
+  "server_notification thread/settings/updated": {
+   "names": {
+    "params.threadId": "S",
+    "params.threadSettings": "S"
+   },
+   "tier": "S"
+  },
   "server_notification thread/started": {
    "names": {
     "params.thread": "S"
@@ -439,6 +446,15 @@
    "names": {
     "params.threadId": "S",
     "params.turn": "S"
+   },
+   "tier": "S"
+  },
+  "server_notification turn/plan/updated": {
+   "names": {
+    "params.explanation": "S",
+    "params.plan": "S",
+    "params.threadId": "S",
+    "params.turnId": "S"
    },
    "tier": "S"
   },

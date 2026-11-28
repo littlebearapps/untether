@@ -290,7 +290,7 @@ def _codex_args(opts: EngineRunOptions) -> list[str]:
 
 
 def test_codex_webhook_unknown_mode_runs_read_only() -> None:
-    opts = EngineRunOptions(permission_mode="plan", unattended_trigger=WEBHOOK)
+    opts = EngineRunOptions(permission_mode="bogus", unattended_trigger=WEBHOOK)
     with capture_logs() as logs:
         first = _codex_args(opts)
         second = _codex_args(opts)
@@ -299,25 +299,25 @@ def test_codex_webhook_unknown_mode_runs_read_only() -> None:
     warns = [e for e in logs if e["event"] == "codex.webhook_unknown_mode_safe"]
     assert len(warns) == 1
     assert warns[0]["trigger"] == WEBHOOK
-    assert warns[0]["mode"] == "plan"
+    assert warns[0]["mode"] == "bogus"
     assert warns[0]["log_level"] == "warning"
     assert not [e for e in logs if e["event"] == "codex.permission_mode.unknown"]
 
 
 def test_codex_webhook_safe_meta() -> None:
     runner = CodexRunner(codex_cmd="codex", extra_args=[])
-    opts = EngineRunOptions(permission_mode="plan", unattended_trigger=WEBHOOK)
+    opts = EngineRunOptions(permission_mode="bogus", unattended_trigger=WEBHOOK)
     with apply_run_options(opts):
         assert runner._permission_mode() == "safe"
-    with apply_run_options(EngineRunOptions(permission_mode="plan")):
-        assert runner._permission_mode() == "plan"
+    with apply_run_options(EngineRunOptions(permission_mode="bogus")):
+        assert runner._permission_mode() == "bogus"
 
 
 @pytest.mark.parametrize(
     "opts",
     [
-        EngineRunOptions(permission_mode="plan", unattended_trigger=CRON),
-        EngineRunOptions(permission_mode="plan"),
+        EngineRunOptions(permission_mode="bogus", unattended_trigger=CRON),
+        EngineRunOptions(permission_mode="bogus"),
         EngineRunOptions(permission_mode="auto", unattended_trigger=WEBHOOK),
         EngineRunOptions(unattended_trigger=WEBHOOK),
     ],

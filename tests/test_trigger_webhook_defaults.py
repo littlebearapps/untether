@@ -145,8 +145,9 @@ def test_opt_in_without_unsafe_mode_is_invalid(extra: dict[str, Any]) -> None:
     [
         (
             "codex",
-            "plan",
-            "allowed values: ['ask', 'ask-writes', 'auto', 'review', 'safe']",
+            "yolo",
+            "allowed values: ['ask', 'ask-writes', 'auto', 'plan', 'plan-auto',"
+            " 'review', 'safe']",
         ),
         ("opencode", "plan", "has no permission_mode a webhook can set"),
         ("claude", "yolo", "unknown permission_mode 'yolo'"),

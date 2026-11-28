@@ -140,11 +140,15 @@ ANTIGRAVITY_PERMISSION_MODES: frozenset[str] = frozenset(
 
 # Codex tiers (#421, #963): exec runs Full auto (``auto``, stored as None by
 # /config) or Safe; app-server adds three that prompt (Ask me, Ask before
-# writes, Auto-review). An app-server-only mode on exec is refused before
-# spawn (``runners/codex.py``); an unknown stored mode fails closed to
+# writes, Auto-review) and Plan first (``plan`` / ``plan-auto``, #965). An
+# app-server-only mode on exec is refused before spawn
+# (``runners/codex.py``); an unknown stored mode fails closed to
 # read-only on app-server and open on exec (webhooks: safe, #1142).
 CODEX_PERMISSION_MODES_EXEC: frozenset[str] = frozenset({"auto", "safe"})
-CODEX_APP_SERVER_ONLY_MODES: frozenset[str] = frozenset({"ask", "ask-writes", "review"})
+CODEX_APP_SERVER_ONLY_MODES: frozenset[str] = frozenset(
+    {"ask", "ask-writes", "review", "plan", "plan-auto"}
+)
+CODEX_PLAN_MODES: frozenset[str] = frozenset({"plan", "plan-auto"})
 CODEX_PERMISSION_MODES_APP_SERVER: frozenset[str] = (
     CODEX_PERMISSION_MODES_EXEC | CODEX_APP_SERVER_ONLY_MODES
 )

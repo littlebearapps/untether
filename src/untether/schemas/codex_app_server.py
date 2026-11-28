@@ -66,11 +66,22 @@ CODEX_APP_SERVER_USED: dict[tuple[MessageKind, str], Tier] = {
     ("server_notification", "item/autoApprovalReview/started"): "S",
     ("server_notification", "item/autoApprovalReview/completed"): "S",
     ("server_notification", "guardianWarning"): "S",
+    # #965 plan mode: the checklist (model-dependent) and the mode change
+    # (only ``collaborationMode.mode`` is read; the rest is never logged).
+    ("server_notification", "turn/plan/updated"): "S",
+    ("server_notification", "thread/settings/updated"): "S",
     # Answered from a Telegram card (#963), or declined when unattended.
     ("server_request", "item/commandExecution/requestApproval"): "S",
     ("server_request", "item/fileChange/requestApproval"): "S",
     ("server_request", "item/permissions/requestApproval"): "S",
     ("server_request", "mcpServer/elicitation/request"): "S",
+}
+
+# Fields whose tier Untether relies on (#965): plan mode sends the
+# experimental ``collaborationMode`` and reads the stable resume echo.
+CODEX_APP_SERVER_FIELDS: dict[tuple[str, str], Tier] = {
+    ("client_request turn/start", "params.collaborationMode"): "E",
+    ("client_request thread/resume", "result.collaborationMode"): "S",
 }
 
 # Payload types Untether reads, by schema definition name. A non-empty tuple
@@ -340,6 +351,14 @@ class ThreadOpenResult(_Wire):
     reasoning_effort: str | None = None
 
 
+class ThreadResumeResult(ThreadOpenResult):
+    """``thread/resume`` adds the thread's effective mode (#965,
+    ``{mode, settings}``): only ``mode`` is read, as
+    ``settings.developer_instructions`` is Codex's whole template."""
+
+    collaboration_mode: dict[str, Any] | None = None
+
+
 class ThreadListResult(_Wire):
     data: list[Thread] = msgspec.field(default_factory=list)
     next_cursor: str | None = None
@@ -352,7 +371,7 @@ class TurnStartResult(_Wire):
 RESULT_TYPES: dict[str, type[_Wire]] = {
     "initialize": InitializeResult,
     "thread/start": ThreadOpenResult,
-    "thread/resume": ThreadOpenResult,
+    "thread/resume": ThreadResumeResult,
     "thread/list": ThreadListResult,
     "turn/start": TurnStartResult,
 }
@@ -434,6 +453,15 @@ class GuardianWarningParams(_Wire):
     thread_id: str = ""
 
 
+class TurnPlanUpdatedParams(_Wire):
+    """#965: ``turn/plan/updated`` (Codex's ``update_plan`` checklist)."""
+
+    thread_id: str
+    turn_id: str = ""
+    explanation: str | None = None
+    plan: list[dict[str, Any]] = msgspec.field(default_factory=list)
+
+
 # Server request params (#963). Lenient: nested shapes stay untyped, and
 # ``availableDecisions`` (experimental field, sent on stable connections
 # anyway, findings H2) is optional.
@@ -475,6 +503,9 @@ class PermissionsApprovalParams(_Wire):
 DICT_NOTIFICATIONS = frozenset(
     {"item/autoApprovalReview/started", "item/autoApprovalReview/completed"}
 )
+# #965: read as a plain dict for ``collaborationMode.mode`` only (the rest
+# carries Codex's mode template and is never decoded or logged).
+SETTINGS_NOTIFICATION = "thread/settings/updated"
 # The one experimental-tier field read on a stable connection (register row:
 # the server sends it unasked; a stable fallback mirrors Codex's default set).
 EXPERIMENTAL_FIELDS_READ = frozenset({"availableDecisions"})
@@ -529,6 +560,7 @@ NOTIFICATION_TYPES: dict[str, type[_Wire]] = {
     "account/rateLimits/updated": RateLimitsUpdatedParams,
     "model/rerouted": ModelReroutedParams,
     "thread/status/changed": ThreadStatusChangedParams,
+    "turn/plan/updated": TurnPlanUpdatedParams,
 }
 
 
