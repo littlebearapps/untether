@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ...logging import get_logger
+from ...utils.error_display import NO_CONFIG_PATH
 from ..chat_prefs import ChatPrefsStore
 from ..files import split_command_args
 from ..listen_mode import resolve_listen_mode
@@ -123,7 +124,7 @@ async def _plan_listen_command(
             )
         if chat_prefs is None:
             return ActionPlan(
-                reply_text="chat listen settings are unavailable (no config path)."
+                reply_text=f"chat listen settings are unavailable {NO_CONFIG_PATH}"
             )
         return ActionPlan(
             reply_text=f"chat listen mode **set to** `{action}`",
@@ -150,7 +151,7 @@ async def _plan_listen_command(
             )
         if chat_prefs is None:
             return ActionPlan(
-                reply_text="chat listen settings are unavailable (no config path)."
+                reply_text=f"chat listen settings are unavailable {NO_CONFIG_PATH}"
             )
         return ActionPlan(
             reply_text="chat listen mode **reset** to `all`.",

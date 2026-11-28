@@ -750,6 +750,8 @@ async def test_stop_tap_ends_with_the_feedback_hint(
     done = _completed(events)
     assert not done.ok
     assert done.error == gate._STOPPED_BY_CARD
+    # #1196: a deliberate stop; the bridge adds no "send again" fallback.
+    assert done.usage == {"user_stopped": True}
 
 
 # --- 963-4: auto-review rows, guardianWarning, hints ------------------------------

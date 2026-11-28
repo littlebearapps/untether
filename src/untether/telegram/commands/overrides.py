@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Literal
 
 from ...context import RunContext
 from ...directives import DirectiveError
+from ...utils.error_display import DIRECTIVE_NEXT_STEP, error_reply
 from ..chat_prefs import ChatPrefsStore
 from ..engine_defaults import resolve_engine_for_message
 from ..engine_overrides import EngineOverrides
@@ -157,7 +158,7 @@ async def resolve_engine_selection(
             chat_id=msg.chat_id,
         )
     except DirectiveError as exc:
-        await reply(text=f"error:\n{exc}")
+        await reply(text=error_reply(exc, DIRECTIVE_NEXT_STEP))
         return None
     selection = await resolve_engine_for_message(
         runtime=cfg.runtime,

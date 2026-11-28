@@ -4,6 +4,33 @@ When an engine fails, Untether scans the error message and shows an actionable r
 
 This page lists all recognised error patterns grouped by category, in the order they are checked. Hints are matched by substring (case-insensitive) — first match wins, so the order is part of the behaviour.
 
+When no pattern matches, the card still ends with a next step: *Send your message again. If it keeps failing, /new starts a fresh session — or /export this chat and report it.* A card that says the saved session was just cleared skips this line, because that notice already says your next message starts a new session, and so does a deliberate stop (Codex's 🛑 Stop on an approval card already says what to do next) ([#1196](https://github.com/littlebearapps/untether/issues/1196)).
+
+## Message style guide
+
+Every error, warning and maintenance notice Untether shows follows these rules ([#1196](https://github.com/littlebearapps/untether/issues/1196)).
+
+**Pass through or explain.** If the engine's own error is already clear (a Claude Code or `agy` usage-limit message, Codex's own wording), show it as it is. If it's cryptic (an exit code, a JSON blob, a provider error code), add a plain-English hint above it and keep the raw text in the code block below.
+
+**Every error names a next step.** Say which of these applies:
+
+- **Just continue:** send your message again, perhaps after a wait (rate limits, short network errors, the RAM guard).
+- **Start fresh:** the session can't be resumed, so send `/new`, and say why.
+- **Act elsewhere:** sign the engine CLI in on the host, edit `untether.toml`, change a setting in `/config`, or upgrade the engine.
+- **Report it:** when it really is a bug, point to `/export` and the issue tracker.
+
+A bare "retry" isn't a next step: say who retries and how. `tests/test_error_next_steps.py` checks every hint for one.
+
+**Template:** what happened, then why (only if it helps), then what to do. One or two short sentences.
+
+**Same signs everywhere:** 🛑 blocked, ⚠️ warning, ❌ failed, ⏳ waiting, 💡 the hint line.
+
+**No internal names.** No Python class names, module names, reason codes, pids or issue numbers. Name a config key only when the user has to edit it, together with the file it lives in (`max_turns` in `untether.toml`). Reason codes go to the logs.
+
+**Australian English** (cancelled, recognise, behaviour).
+
+**Never leak secrets.** An engine error shown on a card has URL userinfo and query values masked, and credential-shaped tokens (`sk-…`, `Bearer …`, `api_key=…`) replaced with `[secret]` (`utils/error_display.redact_error_secrets`). Command replies quote an error only through `user_safe_error` (paths, URLs and secrets removed, length capped) or, when the user must fix a path (a project or `@branch` error), `redact_error_secrets` (secrets masked, paths kept), and `agy` text only through `redact_agy_text`.
+
 ## Engine end-of-life and CLI flag drift
 
 These are checked first. The end-of-life patterns must outrank the generic `invalid_request_error` pattern, which AMP's `426` payload would otherwise match with a misleading hint ([#721](https://github.com/littlebearapps/untether/issues/721)); the Codex retired-setting pattern must outrank the generic `no longer supported` fallback, which would otherwise blame the client version ([#830](https://github.com/littlebearapps/untether/issues/830)).
@@ -21,7 +48,7 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `isn't signed in on this host` | On a server, the Gemini API key route (`modelProvider: "gemini"` + `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids interactive sign-in. | Antigravity |
+| `isn't signed in on this host` | Run `agy` once in a terminal on the host to sign in, then send your message again. On a server, the Gemini API key route (`modelProvider: "gemini"` + `GEMINI_API_KEY`) or Enterprise ADC (`AGY_ADC_AUTH=true`) avoids interactive sign-in. | Antigravity |
 | `access token could not be refreshed` | Run `codex login --device-auth` to re-authenticate. | Codex |
 | `log out and sign in again` | Run `codex login` to re-authenticate. | Codex |
 | `anthropic_api_key` | Check that ANTHROPIC_API_KEY is set in your environment. | Claude, Pi |
@@ -59,8 +86,8 @@ These are checked first. The end-of-life patterns must outrank the generic `inva
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `rate limit` | Rate limited — the engine will retry automatically. | All |
-| `too many requests` | Rate limited — the engine will retry automatically. | All |
+| `rate limit` | Rate limited — wait a minute, then send your message again. | All |
+| `too many requests` | Rate limited — wait a minute, then send your message again. | All |
 
 ## Model errors
 
@@ -115,13 +142,13 @@ These are checked before the generic `invalid_request_error` pattern, because th
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `session not found` | Try a fresh session without --session flag. | All |
+| `session not found` | The saved session wasn't found — it may have been deleted or expired. Send `/new` to start a fresh session. When the same card says the saved session was already cleared, the hint says to just send your message again instead. | All |
 
 ## Network and connection errors
 
 | Pattern | Hint | Engines |
 |---------|------|---------|
-| `connection refused` | Check that the target service is running. | All |
+| `connection refused` | The engine couldn't reach a service it needs (connection refused). Check that the service (a local model server or proxy, for example) is running on the host, then send your message again. | All |
 | `connecttimeout` | Connection timed out. Check your network, then try again. | All |
 | `readtimeout` | Connection timed out — usually transient. Try again. | All |
 | `name or service not known` | DNS resolution failed — check your network connection. | All |
@@ -154,6 +181,8 @@ These are checked before the generic `invalid_request_error` pattern, because th
 | `error_during_execution` | The session could not be loaded. Send `/new` to start a fresh session. When the same card says the saved session was already cleared, the hint says to just send your message again instead ([#1168](https://github.com/littlebearapps/untether/issues/1168)). Shown only when the run had no turns; a run that did work before failing gets no hint, and a session Untether closed at its time limit says so instead ([#887](https://github.com/littlebearapps/untether/issues/887)). When the failed session was named by a resume line and isn't the chat's saved one, the hint says the saved session isn't affected instead, on every engine, and the card carries no resume line for the failed session ([#1070](https://github.com/littlebearapps/untether/issues/1070)). | Claude |
 | `finished without a result event` | The engine exited before producing a final answer. Try sending a new message to resume. | All |
 | `finished but no session_id` | The engine crashed during startup. Check that the CLI is installed and working. | All |
+| `error_max_turns` | Claude Code stopped at its turn limit before finishing (a trigger's `max_turns` in `untether.toml`). Your session is saved — send a message to carry on, or raise `max_turns` for the trigger. Also matched on the result's subtype when the text doesn't name it. | Claude |
+| `error_max_budget_usd` | Claude Code stopped at its spending cap before finishing (a trigger's `max_budget_usd` in `untether.toml`). Your session is saved — send a message to carry on, or raise `max_budget_usd` for the trigger. Also matched on the result's subtype. | Claude |
 
 ## Engine-specific errors
 

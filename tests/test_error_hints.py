@@ -56,12 +56,12 @@ class TestGetErrorHint:
     def test_rate_limit(self):
         hint = get_error_hint("429 rate limit exceeded")
         assert hint is not None
-        assert "retry" in hint.lower()
+        assert "send your message again" in hint
 
     def test_session_not_found(self):
         hint = get_error_hint("Session not found for the given ID")
         assert hint is not None
-        assert "--session" in hint
+        assert "/new" in hint
 
     def test_connection_refused(self):
         hint = get_error_hint("Connection refused on port 8080")
@@ -190,7 +190,7 @@ class TestGetErrorHint:
     def test_too_many_requests(self):
         hint = get_error_hint("429 Too Many Requests")
         assert hint is not None
-        assert "retry" in hint.lower()
+        assert "send your message again" in hint
 
     # --- Network errors (extended) ---
 

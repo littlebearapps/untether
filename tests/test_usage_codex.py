@@ -185,7 +185,10 @@ async def test_non_chatgpt_auth(
             "Couldn't read Codex's quota (the host is short of memory or at its"
             " run limit right now; try /usage again in a minute).",
         ),
-        (RuntimeError("x"), "Couldn't read Codex's quota (RuntimeError)."),
+        (
+            RuntimeError("x"),
+            "Couldn't read Codex's quota (unexpected error) — try /usage again shortly.",
+        ),
     ],
 )
 async def test_failure_lines(

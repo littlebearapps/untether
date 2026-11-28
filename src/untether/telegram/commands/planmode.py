@@ -7,6 +7,7 @@ import html
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, claude_cli_permission_mode
+from ...utils.error_display import NO_CONFIG_PATH
 from ._permission_mode_text import (
     APPLY_TIMING_TEXT,
     NO_OVERRIDE_LABEL,
@@ -76,7 +77,7 @@ class PlanModeCommand:
         config_path = ctx.config_path
         if config_path is None:
             return CommandResult(
-                text="permission mode overrides unavailable (no config path).",
+                text=f"permission mode overrides unavailable {NO_CONFIG_PATH}",
                 notify=True,
             )
 
