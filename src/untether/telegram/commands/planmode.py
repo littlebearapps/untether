@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, claude_cli_permission_mode
@@ -315,7 +317,7 @@ async def _handle_codex(ctx: CommandContext, config_path) -> CommandResult:
     if args not in {"", "show", "off", "clear", *_CODEX_MODES}:
         return CommandResult(
             text=(
-                f"<b>{args}</b> isn't a Codex plan mode: use /planmode on,"
+                f"<b>{html.escape(args)}</b> isn't a Codex plan mode: use /planmode on,"
                 " plan-auto or off, or /config → Approval policy."
             ),
             notify=True,
