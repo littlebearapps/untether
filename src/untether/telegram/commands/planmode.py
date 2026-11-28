@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+
 from ...commands import CommandBackend, CommandContext, CommandResult
 from ...logging import get_logger
 from ...runners.run_options import CLAUDE_PLAN_AUTO_MODE, claude_cli_permission_mode
@@ -37,8 +39,8 @@ PERMISSION_MODES = {
 _PLANNING_MODES = ("plan", CLAUDE_PLAN_AUTO_MODE)
 
 # Engines that support the /planmode command (Claude-style permission modes).
-# Codex and Gemini have approval policies but use different semantics —
-# they should use /config → Approval policy instead.
+# Antigravity and Codex have their own handlers below; Gemini uses
+# /config → Approval policy instead.
 _PLANMODE_ENGINES = frozenset({"claude"})
 
 
@@ -82,9 +84,11 @@ class PlanModeCommand:
         current_engine = await resolve_effective_engine(ctx)
         if current_engine == "antigravity":
             return await _handle_antigravity(ctx, config_path)
+        if current_engine == "codex":
+            return await _handle_codex(ctx, config_path)
         if current_engine not in _PLANMODE_ENGINES:
             hint = ""
-            if current_engine in {"codex", "gemini"}:
+            if current_engine == "gemini":
                 hint = " Use /config → Approval policy instead."
             return CommandResult(
                 text=(
@@ -278,6 +282,74 @@ async def _handle_antigravity(ctx: CommandContext, config_path) -> CommandResult
         )
         return await _describe("override cleared. permission mode: ")
     return CommandResult(text=PLANMODE_USAGE, notify=True)
+
+
+_CODEX_MODES = {"on": "plan", "plan-auto": "plan-auto"}
+_CODEX_MODE_TEXT = {
+    "plan": (
+        "Plan first",
+        "Codex plans without changing anything; reply to go ahead",
+    ),
+    "plan-auto": (
+        "Plan first (auto)",
+        "Codex plans first and the plan is approved for you",
+    ),
+}
+CODEX_NEEDS_APP_SERVER = (
+    "Plan mode needs the app-server transport. Set"
+    ' <code>transport = "app-server"</code> under <code>[engines.codex]</code>,'
+    " or pick Full auto or Safe in /config → Approval policy."
+)
+
+
+async def _handle_codex(ctx: CommandContext, config_path) -> CommandResult:
+    """#965: ``/planmode`` for Codex on app-server: ``on`` = Plan first,
+    ``plan-auto``, ``off`` / ``clear`` drop the override (back to Full
+    auto), ``show``. Exec has no plan mode."""
+    from ..chat_prefs import shared_prefs_store
+    from ..engine_overrides import with_override
+    from .config import _codex_pm_label, _codex_transport
+
+    args = ctx.args_text.strip().lower()
+    if _codex_transport(ctx) != "app-server":
+        return CommandResult(
+            text=CODEX_NEEDS_APP_SERVER, notify=True, parse_mode="HTML"
+        )
+    if args not in {"", "show", "off", "clear", *_CODEX_MODES}:
+        return CommandResult(
+            text=(
+                f"<b>{html.escape(args)}</b> isn't a Codex plan mode: use /planmode on,"
+                " plan-auto or off, or /config → Approval policy."
+            ),
+            notify=True,
+            parse_mode="HTML",
+        )
+    prefs = shared_prefs_store(config_path)
+    chat_id = ctx.message.channel_id
+    current = await prefs.get_engine_override(chat_id, "codex")
+    mode = current.permission_mode if current else None
+    if args == "":
+        args = "off" if mode in _CODEX_MODE_TEXT else "on"
+    prefix = "permission mode: "
+    if args != "show":
+        mode = _CODEX_MODES.get(args)
+        await prefs.set_engine_override(
+            chat_id, "codex", with_override(current, permission_mode=mode)
+        )
+        logger.info(
+            "planmode.set",
+            chat_id=chat_id,
+            sender_id=ctx.message.sender_id,
+            mode=args,
+            engine="codex",
+        )
+        prefix = "applies from your next message. permission mode for this chat: "
+    label, hint = _CODEX_MODE_TEXT.get(
+        mode or "", (_codex_pm_label(mode, "app-server"), "no plan phase")
+    )
+    return CommandResult(
+        text=f"{prefix}<b>{label}</b>: {hint}.", notify=True, parse_mode="HTML"
+    )
 
 
 BACKEND: CommandBackend = PlanModeCommand()

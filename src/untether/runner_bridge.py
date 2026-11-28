@@ -1077,6 +1077,15 @@ def _apply_preamble(prompt: str, engine: str, *, transport: str | None = None) -
             # the preamble in front would make it text for the model.
             logger.info("preamble.skipped", reason="native_command")
             return prompt
+    if engine == "codex" and transport == "app-server":
+        from .runners.run_options import CODEX_PLAN_MODES, get_run_options
+
+        run_opts = get_run_options()
+        if run_opts is not None and run_opts.permission_mode in CODEX_PLAN_MODES:
+            # #965: Codex's own plan template governs a plan turn's output;
+            # the preamble's summary format fights its <proposed_plan>.
+            logger.info("preamble.skipped", reason="codex_plan_mode")
+            return prompt
     cfg = _load_preamble_settings()
     if not cfg.enabled:
         logger.debug("preamble.disabled")

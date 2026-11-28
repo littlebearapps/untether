@@ -314,7 +314,15 @@ class _CodexLive:
         # #1431: the transport changed to exec since spawn: close the idle
         # session now, so the message resumes through exec at once instead of
         # waiting out the idle grace.
-        return None if self._cas().APP_SERVER_ACTIVE else "options_changed"
+        cas = self._cas()
+        if not cas.APP_SERVER_ACTIVE:
+            return "options_changed"
+        # #965 D1: a stable process can't take its thread out of Plan mode;
+        # the message resumes on one that can.
+        live = self._live(session_id)
+        if live is not None and cas._needs_mode_reset(live):
+            return "options_changed"
+        return None
 
     async def close_idle_for_continue(self, cwd: Path | None) -> int:
         return await self._cas().close_idle_for_continue(cwd)

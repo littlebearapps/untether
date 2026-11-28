@@ -684,7 +684,8 @@ class TestUsageAntigravity:
 
 class TestPlanModeEngineGate:
     @pytest.mark.anyio
-    async def test_planmode_blocked_for_codex(self):
+    async def test_planmode_blocked_for_codex_on_exec(self):
+        """#965: Codex plan mode is app-server only; exec gets the fix."""
         ctx = FakeCommandContext(
             args_text="on",
             config_path=Path("/tmp/fake.toml"),
@@ -693,8 +694,7 @@ class TestPlanModeEngineGate:
         cmd = PlanModeCommand()
         result = await cmd.handle(ctx)  # type: ignore[arg-type]
         assert result is not None
-        assert "only available for claude" in result.text.lower()
-        assert "codex" in result.text.lower()
+        assert "plan mode needs the app-server transport" in result.text.lower()
 
     @pytest.mark.anyio
     async def test_planmode_blocked_for_codex_with_config_hint(self):
@@ -751,7 +751,7 @@ class TestPlanModeEngineGate:
 
     @pytest.mark.anyio
     async def test_planmode_blocked_for_project_engine_codex(self):
-        """Even if global default is claude, project engine codex should block."""
+        """Even if global default is claude, a project's Codex on exec blocks."""
         ctx = FakeCommandContext(
             args_text="on",
             config_path=Path("/tmp/fake.toml"),
@@ -762,7 +762,7 @@ class TestPlanModeEngineGate:
         cmd = PlanModeCommand()
         result = await cmd.handle(ctx)  # type: ignore[arg-type]
         assert result is not None
-        assert "only available for claude" in result.text.lower()
+        assert "app-server transport" in result.text.lower()
 
 
 class TestUsageDebugMode:

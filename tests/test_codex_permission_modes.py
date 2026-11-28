@@ -79,6 +79,9 @@ _TIERS = [
     ("ask", "on-request", "workspace-write", "user", True),
     ("ask-writes", "on-request", "read-only", "user", False),
     ("review", "on-request", "workspace-write", "auto_review", True),
+    # #965 D3: Plan first runs the Ask before writes triple.
+    ("plan", "on-request", "read-only", "user", False),
+    ("plan-auto", "on-request", "read-only", "user", False),
 ]
 
 
@@ -286,9 +289,9 @@ def test_diff_preview_supported_by_transport() -> None:
 # --- validator ------------------------------------------------------------------
 
 
-def test_validator_has_the_five_codex_modes() -> None:
+def test_validator_has_the_codex_modes() -> None:
     assert VALID_PERMISSION_MODES_BY_ENGINE["codex"] == frozenset(
-        {"auto", "safe", "ask", "ask-writes", "review"}
+        {"auto", "safe", "ask", "ask-writes", "review", "plan", "plan-auto"}
     )
     assert set(gate.TIERS) == CODEX_PERMISSION_MODES_APP_SERVER
 

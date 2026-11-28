@@ -153,6 +153,8 @@ CODEX_MODE_LABELS: dict[str, str] = {
     "ask": "Ask me",
     "ask-writes": "Ask before writes",
     "review": "Auto-review",
+    "plan": "Plan first",  # #965
+    "plan-auto": "Plan first (auto)",
 }
 
 

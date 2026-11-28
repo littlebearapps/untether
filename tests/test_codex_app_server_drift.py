@@ -30,7 +30,10 @@ from untether.runners.codex_app_server import (
     codex_app_server_support,
     probe_schema_subset,
 )
-from untether.schemas.codex_app_server import PROBED_APP_SERVER_VERSION
+from untether.schemas.codex_app_server import (
+    CODEX_APP_SERVER_FIELDS,
+    PROBED_APP_SERVER_VERSION,
+)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("codex") is None, reason="codex CLI not installed"
@@ -76,6 +79,18 @@ def test_schema_subset_has_not_drifted(codex_env: Path) -> None:
             elif got["names"][name] != tier:
                 drift.append(f"{key}: {name} tier {tier} → {got['names'][name]}")
     assert not drift, f"app-server schema drift: {drift} — {_REDERIVE}"
+
+
+def test_plan_mode_field_tiers(codex_env: Path) -> None:
+    """#965: ``turn/start.collaborationMode`` stays experimental (so plan
+    mode needs ``experimentalApi``) and the resume echo stays stable."""
+    live = probe_schema_subset("codex")
+    drift = [
+        f"{key} {name}: want {tier}, got {live.get(key, {}).get('names', {}).get(name)}"
+        for (key, name), tier in CODEX_APP_SERVER_FIELDS.items()
+        if live.get(key, {}).get("names", {}).get(name) != tier
+    ]
+    assert not drift, f"plan-mode field drift: {drift} — {_REDERIVE}"
 
 
 def test_gate_passes_on_the_installed_cli(codex_env: Path) -> None:

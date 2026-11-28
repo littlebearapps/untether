@@ -83,7 +83,7 @@ from .codex_rpc import (
     Response,
     ServerRequest,
 )
-from .run_options import get_run_options
+from .run_options import CODEX_PLAN_MODES, get_run_options
 
 logger = get_logger(__name__)
 
@@ -356,6 +356,12 @@ OPT_OUT_NOTIFICATIONS: tuple[str, ...] = (
     "item/commandExecution/outputDelta",
     "item/fileChange/outputDelta",
 )
+# #965: an experimental connection (plan mode) also gets these; Untether
+# reads neither (Δ D40, F19).
+_EXPERIMENTAL_OPT_OUTS: tuple[str, ...] = (
+    "turn/moderationMetadata",
+    "thread/readState/changed",
+)
 # /continue: without sourceKinds the server lists only cli + vscode, which
 # would miss exec-made threads. Sub-agent kinds stay out.
 CONTINUE_SOURCE_KINDS: tuple[str, ...] = ("cli", "vscode", "exec", "appServer")
@@ -398,8 +404,8 @@ _STOPPED_BY_CARD = (
     " next message."
 )
 _WITHDRAWN = "\N{BLACK SQUARE FOR STOP}\N{VARIATION SELECTOR-16} Withdrawn by Codex"
-# Items with no row: the prompt echo and hook text, plus plan (#965).
-_SILENT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt", "plan"})
+# Items with no row: the prompt echo and hook text (plan: ``_item_rows``, #965).
+_SILENT_ITEM_TYPES = frozenset({"userMessage", "hookPrompt"})
 # #832: Claude's 🗜️ wording (#819), so both engines read the same.
 _COMPACTING_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Compacting context…"
 _COMPACTED_TITLE = "\N{COMPRESSION}\N{VARIATION SELECTOR-16} Context compacted"
@@ -422,6 +428,12 @@ _SYSTEM_ERROR_NOTE = (
     "Codex reported a system error on this thread; the turn may not finish."
 )
 _CONTEXT_ACTION_ID = "codex.context"
+# #965 D1: the lost-marker fallback (restart, /continue, a TUI-planned thread).
+_PLAN_STUCK_NOTE = (
+    f"{_WARNING} This Codex thread was still in Plan mode, so this turn planned"
+    " instead of acting; send your message again"
+)
+_PLAN_STEP_MARKS = {"completed": "✓", "inProgress": "▸", "pending": "·"}
 _UNKNOWN_ITEMS_LOGGED: set[str] = set()
 # App-server names -> exec's, so exec's title helpers give the same rows.
 _EXEC_STATUS = {"inProgress": "in_progress"}
@@ -574,6 +586,9 @@ TIERS: dict[str, Tier] = {
     "ask": Tier("on-request", "workspace-write", label="ask me"),
     "ask-writes": Tier("on-request", "read-only", label="ask before writes"),
     "review": Tier("on-request", "workspace-write", "auto_review", "auto-review"),
+    # #965 D3: plan turns run the Ask before writes triple.
+    "plan": Tier("on-request", "read-only", label="plan first"),
+    "plan-auto": Tier("on-request", "read-only", label="plan first (auto)"),
 }
 
 
@@ -731,6 +746,16 @@ class AppServerRunState(CodexRunState):
     spawn_trust: tuple[Any, ...] | None = None
     read_waits: dict[int, _ReadWait] = field(default_factory=dict)
     listeners: list[Any] = field(default_factory=list)
+    # #965: a plan-mode run (``plan`` / ``plan-auto``); ``experimental`` is the
+    # connection's ``experimentalApi`` (plan mode or a D1 reset, fixed at
+    # spawn); ``reset`` = the first turn sends ``collaborationMode default``;
+    # ``plan_text`` = this turn's completed ``plan`` item.
+    plan: bool = False
+    experimental: bool = False
+    reset: bool = False
+    plan_text: str | None = None
+    # The chat's effort at spawn (a live follow-up has no run options).
+    effort: str | None = None
 
     # Duck-typed by the stall watchdogs (``runner._approval_pending``, the
     # bridge's ``_has_pending_approval``): Codex is waiting on the user.
@@ -810,6 +835,34 @@ def _settle_start(state: AppServerRunState, wait: _StartWait) -> None:
         state.pending_start = None
 
 
+# #965 D1: threads Untether saw in Plan mode (the mode is saved on the
+# thread, P7). The next non-plan run opens an experimental connection and
+# sends ``collaborationMode default`` once. In memory: a lost marker is
+# caught by the resume echo (``_PLAN_STUCK_NOTE``).
+_PLAN_THREADS: set[str] = set()
+
+
+def _needs_mode_reset(state: AppServerRunState) -> bool:
+    """A stable process can't switch its plan-touched thread back to default
+    (D1): a live follow-up must respawn instead of reusing it."""
+    return not state.experimental and state.thread_id in _PLAN_THREADS
+
+
+def _collab_mode(state: AppServerRunState, mode: str) -> dict[str, Any]:
+    """``turn/start.collaborationMode`` (experimental). ``settings.model``
+    is required; the effort goes here because the field takes precedence
+    over ``turn/start.effort``; ``developer_instructions: None`` = Codex's
+    own template for the mode."""
+    return {
+        "mode": mode,
+        "settings": {
+            "model": state.model,
+            "reasoning_effort": state.effort,
+            "developer_instructions": None,
+        },
+    }
+
+
 # #964: the run that owns each thread right now. Set when the thread opens;
 # released only once the run's process has exited (§16 item 4), and only by
 # the run that still owns it.
@@ -884,7 +937,19 @@ class CodexAppServerRunner(CodexRunner):
             _warn_webhook_unknown_mode(webhook, raw_mode)
         state.unattended = run_options.unattended_trigger if run_options else None
         state.diff_preview = run_options.diff_preview if run_options else None
-        state.tier = _tier(self._permission_mode(), unattended=bool(state.unattended))
+        mode = self._permission_mode()
+        state.tier = _tier(mode, unattended=bool(state.unattended))
+        # #965: experimental only for plan mode, or once to reset a thread
+        # Untether saw in plan mode (D1). Fixed here: it is per connection.
+        state.plan = mode in CODEX_PLAN_MODES
+        state.reset = (
+            not state.plan
+            and resume is not None
+            and not resume.is_continue
+            and resume.value in _PLAN_THREADS
+        )
+        state.experimental = state.plan or state.reset
+        state.effort = (run_options.reasoning if run_options else None) or None
         state.sandbox = state.tier.sandbox
         state.check_trust = state.sandbox != "read-only"
         state.cwd = str(get_run_base_dir() or Path.cwd())
@@ -939,8 +1004,11 @@ class CodexAppServerRunner(CodexRunner):
                         "version": __version__,
                     },
                     "capabilities": {
-                        "experimentalApi": False,
-                        "optOutNotificationMethods": list(OPT_OUT_NOTIFICATIONS),
+                        "experimentalApi": state.experimental,
+                        "optOutNotificationMethods": [
+                            *OPT_OUT_NOTIFICATIONS,
+                            *(_EXPERIMENTAL_OPT_OUTS if state.experimental else ()),
+                        ],
                     },
                 },
             )
@@ -1620,6 +1688,12 @@ class CodexAppServerRunner(CodexRunner):
             state.turn_agent_messages.append(
                 _AgentMessageSummary(text=item.text, phase=item.phase)
             )
+        if isinstance(item, cas.GenericItem) and item.type == "plan":
+            # #965: the completed text is authoritative (deltas opted out).
+            text = item.raw.get("text")
+            if phase == "completed" and isinstance(text, str) and text.strip():
+                state.plan_text = text
+            return []
         exec_item = _exec_item(item)
         if isinstance(exec_item, codex_schema.ReasoningItem) and not exec_item.text:
             return []  # summaries arrive on item/completed, when enabled
@@ -1741,6 +1815,8 @@ class CodexAppServerRunner(CodexRunner):
     def _answer(state: AppServerRunState) -> str:
         messages = state.turn_agent_messages
         selected = _select_final_answer(messages)
+        if selected is None and state.plan_text:
+            return state.plan_text  # #965: a plan turn has no agent message
         if selected is None and messages:
             selected = messages[-1].text
         return selected or ""
@@ -1783,7 +1859,11 @@ class CodexAppServerRunner(CodexRunner):
         match msg.method:
             case "initialize":
                 init = cas.decode_result("initialize", msg.result)
-                logger.info("codex.app_server.initialized", user_agent=init.user_agent)
+                logger.info(
+                    "codex.app_server.initialized",
+                    user_agent=init.user_agent,
+                    experimental=state.experimental,
+                )
                 state.outbox.append(("notify", "initialized", {}))
                 if state.check_trust or (resume is not None and not _run_model()):
                     state.outbox.append(("request", "config/read", {"cwd": state.cwd}))
@@ -1819,6 +1899,8 @@ class CodexAppServerRunner(CodexRunner):
             case "turn/start":
                 started = cas.decode_result("turn/start", msg.result)
                 state.turn_id = started.turn.id
+                if state.reset and state.thread_id:
+                    _PLAN_THREADS.discard(state.thread_id)  # D1: reset done
         return []
 
     @staticmethod
@@ -1905,6 +1987,15 @@ class CodexAppServerRunner(CodexRunner):
         )
         # Codex saves trust only where the selected entry has no trust_level.
         if isinstance(entry, dict) and entry.get("trust_level"):
+            if state.sandbox is None and state.reset:
+                # #965: an omitted sandbox on resume keeps the thread's saved
+                # one (the plan turn's read-only), so the D1 reset run names
+                # Codex's own default: the config's, else trust-based.
+                state.sandbox = config.get("sandbox_mode") or (
+                    "workspace-write"
+                    if entry.get("trust_level") == "trusted"
+                    else "read-only"
+                )
             return
         sandbox_mode = config.get("sandbox_mode")
         wanted = state.sandbox or sandbox_mode
@@ -2005,6 +2096,7 @@ class CodexAppServerRunner(CodexRunner):
         events.extend(state.pending_rows)
         state.pending_rows.clear()
         events.extend(self._echo_check(result, state=state))
+        events.extend(self._mode_echo_check(result, state=state))
         if state.manual_compact:
             # #964: Codex's own compaction (stable), not the text as a prompt.
             logger.info("codex.app_server.compact_started", thread_id=result.thread.id)
@@ -2019,8 +2111,39 @@ class CodexAppServerRunner(CodexRunner):
         }
         if run_options is not None and run_options.reasoning:
             turn["effort"] = run_options.reasoning
+        if state.plan:
+            turn["collaborationMode"] = _collab_mode(state, "plan")
+            _PLAN_THREADS.add(result.thread.id)
+        elif state.reset:
+            turn["collaborationMode"] = _collab_mode(state, "default")
+            logger.info("codex.app_server.plan_mode_reset", thread_id=result.thread.id)
         state.outbox.append(("request", "turn/start", turn))
         return events
+
+    def _mode_echo_check(
+        self, result: cas.ThreadOpenResult, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#965 D1 fallback: a stable resume of a thread still in Plan mode
+        (the marker was lost) runs this turn as a plan turn, and only an
+        experimental connection can switch it back. Say so once, and mark
+        the thread so the next run resets it. Reads ``mode`` only."""
+        echo = getattr(result, "collaboration_mode", None)
+        if not isinstance(echo, dict) or echo.get("mode") != "plan":
+            return []
+        thread_id = result.thread.id
+        if state.experimental:
+            return []  # a plan turn, or the reset this turn already sends
+        _PLAN_THREADS.add(thread_id)
+        logger.warning("codex.app_server.plan_mode_stuck", thread_id=thread_id)
+        return [
+            state.factory.action_completed(
+                action_id="codex.plan_mode_stuck",
+                kind="warning",
+                title=_PLAN_STUCK_NOTE,
+                ok=True,
+                level="warning",
+            )
+        ]
 
     def _echo_check(
         self, result: cas.ThreadOpenResult, *, state: AppServerRunState
@@ -2081,6 +2204,9 @@ class CodexAppServerRunner(CodexRunner):
     ) -> list[UntetherEvent]:
         if msg.method in cas.DICT_NOTIFICATIONS:
             return self._review_rows(msg, state)  # #963 Auto-review
+        if msg.method == cas.SETTINGS_NOTIFICATION:
+            self._on_thread_settings(msg.params, state)
+            return []
         if msg.method not in cas.NOTIFICATION_TYPES:
             if msg.method not in state.seen_unknown:
                 state.seen_unknown.add(msg.method)
@@ -2142,6 +2268,8 @@ class CodexAppServerRunner(CodexRunner):
                 codex_reads.merge_push(self.codex_cmd, msg.params)
             case "model/rerouted":
                 return self._on_rerouted(params, state=state)
+            case "turn/plan/updated":
+                return self._plan_checklist(params, state=state)
             case "turn/completed":
                 return self._on_turn_completed(
                     params.turn, state=state, resume=resume, found_session=found_session
@@ -2159,6 +2287,7 @@ class CodexAppServerRunner(CodexRunner):
         state.turn_id = turn.id
         state.turn_open = True
         state.turn_agent_messages.clear()
+        state.plan_text = None
         state.card_stop = False
         if not (state.live_mode and state.completed_turns):
             return []
@@ -2268,6 +2397,51 @@ class CodexAppServerRunner(CodexRunner):
             text=text,
             command_uuid=command_uuid,
         )
+
+    @staticmethod
+    def _on_thread_settings(params: Any, state: AppServerRunState) -> None:
+        """#965: ``thread/settings/updated`` echoes Codex's whole mode
+        template in ``developer_instructions``: read ``collaborationMode.mode``
+        and nothing else, and never log the params."""
+        if not isinstance(params, dict) or params.get("threadId") != state.thread_id:
+            return
+        settings = params.get("threadSettings")
+        collab = (
+            settings.get("collaborationMode") if isinstance(settings, dict) else None
+        )
+        mode = collab.get("mode") if isinstance(collab, dict) else None
+        if not isinstance(mode, str):
+            return
+        logger.info(
+            "codex.app_server.thread_settings", thread_id=state.thread_id, mode=mode
+        )
+        if mode == "plan" and state.thread_id:
+            _PLAN_THREADS.add(state.thread_id)
+
+    def _plan_checklist(
+        self, params: cas.TurnPlanUpdatedParams, *, state: AppServerRunState
+    ) -> list[UntetherEvent]:
+        """#965 D6: Codex's ``update_plan`` checklist as one row per turn,
+        replaced on each update. Model-dependent (P7: not emitted on
+        ``gpt-6.1-sol``)."""
+        if params.thread_id != state.thread_id:
+            return []
+        steps = [
+            f"{_PLAN_STEP_MARKS.get(str(p.get('status')), '·')} {p.get('step')}"
+            for p in params.plan
+            if isinstance(p, dict) and p.get("step")
+        ]
+        title = "\N{CLIPBOARD} Plan"
+        if steps:
+            title += ": " + "; ".join(steps)
+        row = state.factory.action_completed(
+            action_id=f"codex.plan.{params.turn_id or state.turn_id}",
+            kind="note",
+            title=title,
+            detail={"explanation": params.explanation, "steps": params.plan},
+            ok=True,
+        )
+        return self._rows(state, [row])
 
     def _on_rerouted(
         self, params: cas.ModelReroutedParams, *, state: AppServerRunState
@@ -2635,6 +2809,8 @@ async def start_followup(
     )
     if compact:
         method, params = "thread/compact/start", {"threadId": state.thread_id}
+    elif state.plan:
+        params["collaborationMode"] = _collab_mode(state, "plan")  # #965
     try:
         await peer.submit(method, params, before_send=register, after_send=written)
     except CodexRpcClosed:
@@ -2984,7 +3160,9 @@ async def steer_into_session(
             if state.closing or state.steer_closed:
                 return "window_closed"
             if _is_idle(state):
-                if run_options is not _UNSET and run_options != state.spawn_options:
+                if (
+                    run_options is not _UNSET and run_options != state.spawn_options
+                ) or _needs_mode_reset(state):  # #965 D1
                     return "options_changed"
                 if cwd is not _UNSET and cwd != state.spawn_cwd:
                     logger.info(

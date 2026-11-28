@@ -719,6 +719,7 @@ _CODEX_PM_MODES: dict[str, str] = {
     "ask": "ask",
     "aw": "ask-writes",
     "rev": "review",
+    "plan": "plan",  # #965; plan-auto is a /planmode value only
 }
 _CODEX_EXEC_PM_ACTIONS = frozenset({"fa", "safe", "cxc"})
 # Home-page label per stored Codex mode (None = Full auto); unknown → as
@@ -728,6 +729,8 @@ _CODEX_PM_LABELS: dict[str, str] = {
     "ask": "ask me",
     "ask-writes": "ask before writes",
     "review": "auto-review",
+    "plan": "plan first",
+    "plan-auto": "plan first (auto)",
 }
 
 
@@ -736,6 +739,8 @@ _CODEX_HOME_HINTS: dict[str, str] = {
     "ask me": "asks before network or outside files",
     "ask before writes": "asks before every write",
     "auto-review": "Codex's reviewer decides",
+    "plan first": "plans before acting",
+    "plan first (auto)": "plans, then goes ahead",
 }
 
 
@@ -765,7 +770,7 @@ def _codex_pm_label(pm: str | None, transport: str) -> str:
 def _codex_app_server_pm_page(
     current_label: str,
 ) -> tuple[list[str], list[list[dict[str, str]]]]:
-    """#421: the five app-server tiers (plan §5.6 wording)."""
+    """#421: the app-server tiers (plan §5.6 wording), plus Plan first (#965)."""
     lines = [
         "<b>📋 Approval policy</b>",
         "",
@@ -781,6 +786,8 @@ def _codex_app_server_pm_page(
         " change and every command that needs more",
         "• <b>Auto-review</b> — like Ask me, but Codex's reviewer decides"
         " instead of you (extra Codex usage)",
+        "• <b>Plan first</b> — Codex plans without changing anything (asks"
+        " before anything more than reading); reply to go ahead",
         "",
         "Cron and webhook runs never ask: actions that need approval fail.",
         "",
@@ -801,7 +808,10 @@ def _codex_app_server_pm_page(
             button("Ask me", "ask", "ask me"),
             button("Ask before writes", "aw", "ask before writes"),
         ],
-        [button("Auto-review", "rev", "auto-review")],
+        [
+            button("Auto-review", "rev", "auto-review"),
+            button("Plan first", "plan", "plan first"),
+        ],
         [
             {"text": "Clear override", "callback_data": "config:pm:cxc"},
             {"text": "← Back", "callback_data": "config:home"},
@@ -3448,6 +3458,7 @@ _TOAST_LABELS: dict[str, dict[str, str]] = {
         "aw": "Approval policy: ask before writes",
         "rev": "Approval policy: auto-review",
         "cxc": "Approval policy: cleared",  # #1155
+        "plan": "Approval policy: plan first",  # #965
         # #558: Antigravity. #1037 / #1060 / #980 (R3-3): a
         # conversation keeps the agent it started with, so a switch
         # across Workspace / Plan first ↔ Ask me / Full access

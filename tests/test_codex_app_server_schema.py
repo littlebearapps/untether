@@ -178,7 +178,7 @@ _STRUCT_KEYS: list[tuple[type, str, str]] = [
     ),
     (cas.InitializeResult, "client_request initialize", "result."),
     (cas.ThreadOpenResult, "client_request thread/start", "result."),
-    (cas.ThreadOpenResult, "client_request thread/resume", "result."),
+    (cas.ThreadResumeResult, "client_request thread/resume", "result."),
     (cas.ThreadListResult, "client_request thread/list", "result."),
     (cas.TurnStartResult, "client_request turn/start", "result."),
     *(
@@ -207,7 +207,9 @@ def test_every_struct_field_exists_in_the_fixture(
 
 def test_every_used_notification_and_item_has_a_struct() -> None:
     used = {m for (k, m) in CODEX_APP_SERVER_USED if k == "server_notification"}
-    assert used == set(cas.NOTIFICATION_TYPES) | cas.DICT_NOTIFICATIONS
+    assert used == set(cas.NOTIFICATION_TYPES) | cas.DICT_NOTIFICATIONS | {
+        cas.SETTINGS_NOTIFICATION
+    }
     requests = {m for (k, m) in CODEX_APP_SERVER_USED if k == "server_request"}
     assert set(cas.REQUEST_PARAM_TYPES) <= requests
     assert set(cas.THREAD_ITEM_TYPES) == set(CODEX_APP_SERVER_TYPES["ThreadItem"])
