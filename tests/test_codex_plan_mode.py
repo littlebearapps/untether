@@ -217,6 +217,34 @@ async def test_default_reset_after_plan_turn(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("trust", "config_sandbox", "sent"),
+    [
+        ("trusted", None, "workspace-write"),
+        ("untrusted", None, "read-only"),
+        ("trusted", "danger-full-access", "danger-full-access"),
+    ],
+)
+async def test_reset_run_names_the_sandbox_full_auto_omits(
+    tmp_path: Path,
+    project: Path,
+    gate_calls: list[str],
+    trust: str,
+    config_sandbox: str | None,
+    sent: str,
+) -> None:
+    # Live CX-37: an omitted sandbox on resume kept the plan turn's read-only,
+    # so "do it" after /planmode off couldn't write.
+    gate._PLAN_THREADS.add(THREAD)
+    config: dict[str, Any] = {"projects": {str(project): {"trust_level": trust}}}
+    if config_sandbox:
+        config["sandbox_mode"] = config_sandbox
+    fake = Fake(tmp_path, config=config)
+    await _run(_runner(fake), resume=_RESUME)
+    assert fake.requests("thread/resume")[0]["sandbox"] == sent
+
+
+@pytest.mark.anyio
 async def test_stable_resume_echo_plan_adds_row_and_marks_thread(
     tmp_path: Path, project: Path, gate_calls: list[str]
 ) -> None:

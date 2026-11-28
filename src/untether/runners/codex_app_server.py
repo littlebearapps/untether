@@ -1987,6 +1987,15 @@ class CodexAppServerRunner(CodexRunner):
         )
         # Codex saves trust only where the selected entry has no trust_level.
         if isinstance(entry, dict) and entry.get("trust_level"):
+            if state.sandbox is None and state.reset:
+                # #965: an omitted sandbox on resume keeps the thread's saved
+                # one (the plan turn's read-only), so the D1 reset run names
+                # Codex's own default: the config's, else trust-based.
+                state.sandbox = config.get("sandbox_mode") or (
+                    "workspace-write"
+                    if entry.get("trust_level") == "trusted"
+                    else "read-only"
+                )
             return
         sandbox_mode = config.get("sandbox_mode")
         wanted = state.sandbox or sandbox_mode
